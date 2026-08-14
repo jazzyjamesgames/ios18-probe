@@ -88,6 +88,12 @@ REDIRECTS = {
         "@rpath/CoreServices",
     "/usr/lib/libRosetta.dylib":
         "@rpath/libRosetta.dylib",
+    # Assumed this was a shared /usr/lib path present on iOS too, same as
+    # libobjc/libSystem -- wrong, confirmed by a real dlopen() failure on
+    # device. libMobileGestalt remains an unverified assumption of the same
+    # kind, untested since we hadn't gotten past this one yet.
+    "/usr/lib/libDiagnosticMessagesClient.dylib":
+        "@rpath/libDiagnosticMessagesClient.dylib",
     # zero referenced symbols, but still a hard (non-weak) dependency -- the
     # file must exist and be loadable regardless of whether anything in
     # CoreSimulator actually calls into it
