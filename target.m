@@ -11,3 +11,9 @@ static void probe_target_loaded(void) {
     NSArray *a = @[@1, @2, @3];
     NSLog(@"[TARGET] constructor ran: %@ count=%lu", s, (unsigned long)a.count);
 }
+
+// Never actually called via dlopen (dlopen doesn't invoke main() on a
+// repurposed executable) -- this only exists so the *initial* compile,
+// which still links as a normal MH_EXECUTE before patch_macho.py flips
+// the header, has an entry point to satisfy the linker.
+int main(void) { return 0; }
