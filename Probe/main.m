@@ -13,6 +13,7 @@
 #import <UIKit/UIKit.h>
 #import <dlfcn.h>
 #import <objc/runtime.h>
+#import <objc/message.h>
 
 @interface NSExtension : NSObject
 @property(nonatomic, strong, readwrite) NSArray *preferredLanguages;
@@ -321,6 +322,54 @@ static void darwinCallback(CFNotificationCenterRef center, void *observer,
       if (instMethods) free(instMethods);
     }
     flush();
+
+    // Now actually call into it. No compile-time headers for these private
+    // classes, so dispatch is via objc_msgSend cast to the real signature
+    // (arm64's ABI needs no separate _stret/_fpret variant, unlike i386/
+    // x86_64 -- a plain cast is correct here for all three return types
+    // below). Lowest-risk calls first (no IPC, pure introspection), then
+    // the real bootstrap entry point known from prior public
+    // reverse-engineering of simctl/Xcode's use of CoreSimulator. Whatever
+    // it does -- graceful NSError, hang, or crash -- is the next real
+    // signal; nothing downstream of it (loadCoreSimulatorServiceWithError:,
+    // an XPC connection to the com.apple.CoreSimulator.CoreSimulatorService
+    // mach service) has any equivalent on iOS, so this is deliberately not
+    // routed around.
+    [log appendString:@"\n=== Calling into CoreSimulator's real API ===\n"];
+    flush();
+
+    Class serviceContextClass = NSClassFromString(@"SimServiceContext");
+    if (!serviceContextClass) {
+      [log appendString:@"SimServiceContext class not found (unexpected -- "
+                         @"it was in the introspection dump above)\n"];
+      flush();
+    } else {
+      typedef NSString *(*StringClassMsg)(Class, SEL);
+      StringClassMsg stringMsg = (StringClassMsg)objc_msgSend;
+      NSString *serviceVersion = stringMsg(serviceContextClass, @selector(serviceVersionString));
+      [log appendFormat:@"+[SimServiceContext serviceVersionString] = %@\n", serviceVersion];
+      flush();
+
+      typedef BOOL (*BoolClassMsg)(Class, SEL);
+      BoolClassMsg boolMsg = (BoolClassMsg)objc_msgSend;
+      BOOL isServer = boolMsg(serviceContextClass, @selector(currentProcessIsServer));
+      [log appendFormat:@"+[SimServiceContext currentProcessIsServer] = %d\n", isServer];
+      flush();
+
+      [log appendString:@"\nCalling +[SimServiceContext "
+                         @"sharedServiceContextForDeveloperDir:error:] ...\n"];
+      flush();
+
+      typedef id (*SharedServiceContextMsg)(Class, SEL, NSString *, NSError **);
+      SharedServiceContextMsg sharedMsg = (SharedServiceContextMsg)objc_msgSend;
+      NSError *serviceError = nil;
+      id serviceContext = sharedMsg(
+          serviceContextClass,
+          @selector(sharedServiceContextForDeveloperDir:error:),
+          @"/Applications/Xcode.app/Contents/Developer", &serviceError);
+      [log appendFormat:@"result: %@\nerror: %@\n", serviceContext, serviceError];
+      flush();
+    }
   }
 
   [log appendFormat:@"\n(written to %@ -- pull it via the Files app)", logPath];
