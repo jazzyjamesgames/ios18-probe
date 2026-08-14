@@ -238,6 +238,24 @@ static void darwinCallback(CFNotificationCenterRef center, void *observer,
     flush();
   }
 
+  [log appendString:@"\n=== Now attempting the real, patched CoreSimulator ===\n"];
+  flush();
+
+  NSString *coresimPath = [[NSBundle mainBundle] pathForResource:@"coresim_target"
+                                                            ofType:@"dylib"];
+  [log appendFormat:@"coresim_target path: %@\n", coresimPath];
+  flush();
+
+  void *coresimHandle = dlopen([coresimPath fileSystemRepresentation], RTLD_NOW);
+  if (!coresimHandle) {
+    const char *err = dlerror();
+    [log appendFormat:@"dlopen FAILED:\n%s\n", err ? err : "(no error string)"];
+  } else {
+    [log appendString:@"dlopen SUCCEEDED -- CoreSimulator's real binary "
+                       @"loaded and fully linked on iOS.\n"];
+  }
+  flush();
+
   [log appendFormat:@"\n(written to %@ -- pull it via the Files app)", logPath];
   flush();
 
