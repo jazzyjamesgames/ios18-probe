@@ -125,15 +125,14 @@ jobs:
           # also came back empty on every one -- that path convention doesn't
           # exist in these RuntimeRoots at all, and cost ~5 minutes of mount
           # time to learn. Using the actual metadata this time instead of guessing.
-          DMG_UUID=$(python3 tools/find_ios18_dmg.py)
-          echo "resolved DMG_UUID=$DMG_UUID"
+          DMG=$(python3 tools/find_ios18_dmg.py)
+          echo "resolved DMG path=$DMG"
 
-          if [ -z "$DMG_UUID" ]; then
-            echo "no UUID resolved from images.plist -- see the metadata dump in the previous step to fix the parser"
+          if [ -z "$DMG" ] || [ ! -e "$DMG" ]; then
+            echo "no usable dmg path resolved from images.plist (path='$DMG', exists=$([ -e "$DMG" ] && echo yes || echo no))"
             exit 0
           fi
 
-          DMG="/Library/Developer/CoreSimulator/Images/${DMG_UUID}.dmg"
           MP="/tmp/mnt/iOS18.1"
           mkdir -p "$MP"
           if sudo hdiutil attach -nobrowse -readonly -mountpoint "$MP" "$DMG" > /tmp/attach.log 2>&1; then
