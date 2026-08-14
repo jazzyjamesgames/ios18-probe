@@ -22,6 +22,27 @@
 - (void)setRequestInterruptionBlock:(void (^)(NSUUID *))callback;
 @end
 
+// Darwin notification checkpoints from LaunchHelper. Set on whatever thread
+// CFNotificationCenter delivers on; read back only after explicitly pumping
+// the run loop below, since a plain dispatch_semaphore_wait/NSThread sleep
+// does NOT spin the run loop and would otherwise never let these callbacks
+// fire at all.
+static BOOL gStarted = NO, gDlopenDone = NO, gProbeRunDone = NO, gReachedEnd = NO;
+
+static void darwinCallback(CFNotificationCenterRef center, void *observer,
+                            CFStringRef name, const void *object,
+                            CFDictionaryRef userInfo) {
+  NSString *n = (__bridge NSString *)name;
+  if ([n hasSuffix:@"started"])
+    gStarted = YES;
+  else if ([n hasSuffix:@"dlopenDone"])
+    gDlopenDone = YES;
+  else if ([n hasSuffix:@"probeRunDone"])
+    gProbeRunDone = YES;
+  else if ([n hasSuffix:@"reachedEnd"])
+    gReachedEnd = YES;
+}
+
 @interface AppDelegate : UIResponder <UIApplicationDelegate>
 @property(strong, nonatomic) UIWindow *window;
 @end
@@ -130,6 +151,19 @@
     [log appendFormat:@"NSExtension init FAILED: %@\n", extError];
     flush();
   } else {
+    CFNotificationCenterRef darwinCenter = CFNotificationCenterGetDarwinNotifyCenter();
+    NSArray<NSString *> *names = @[
+      @"dev.local.ios18probe.LaunchHelper.started",
+      @"dev.local.ios18probe.LaunchHelper.dlopenDone",
+      @"dev.local.ios18probe.LaunchHelper.probeRunDone",
+      @"dev.local.ios18probe.LaunchHelper.reachedEnd",
+    ];
+    for (NSString *n in names) {
+      CFNotificationCenterAddObserver(
+          darwinCenter, NULL, darwinCallback, (__bridge CFStringRef)n, NULL,
+          CFNotificationSuspensionBehaviorDeliverImmediately);
+    }
+
     dispatch_semaphore_t sema = dispatch_semaphore_create(0);
     __block NSString *outcome = nil;
 
@@ -164,9 +198,22 @@
 
     // The completion block above fires once the process is launched and
     // connected, not necessarily once its own beginRequestWithExtensionContext:
-    // work (dlopen + probe_run) has finished -- give it a few seconds before
-    // reading back what it wrote to the shared App Group container.
-    [NSThread sleepForTimeInterval:3.0];
+    // work (dlopen + probe_run) has finished. Actually pump the run loop
+    // (not a blind sleep) so queued Darwin notification callbacks get a
+    // chance to fire, up to 5s or until we've seen the final checkpoint.
+    CFTimeInterval deadline = CFAbsoluteTimeGetCurrent() + 5.0;
+    while (CFAbsoluteTimeGetCurrent() < deadline && !gReachedEnd) {
+      CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.1, false);
+    }
+    [log appendFormat:@"\nDarwin notification checkpoints seen: started=%d "
+                       @"dlopenDone=%d probeRunDone=%d reachedEnd=%d\n",
+                       gStarted, gDlopenDone, gProbeRunDone, gReachedEnd];
+    flush();
+
+    for (NSString *n in names) {
+      CFNotificationCenterRemoveObserver(darwinCenter, NULL,
+                                          (__bridge CFStringRef)n, NULL);
+    }
 
     NSURL *groupURL = [[NSFileManager defaultManager]
         containerURLForSecurityApplicationGroupIdentifier:@"group.dev.local.ios18probe"];

@@ -22,6 +22,16 @@
 #import <dlfcn.h>
 #import <unistd.h>
 
+// Darwin notifications: system-wide, unsandboxed pub-sub, no entitlement
+// needed at all (unlike the App Group file channel, which didn't survive
+// SideStore's resigning). Can't carry the log text, but can confirm exactly
+// how far beginRequestWithExtensionContext: actually got before returning.
+static void postDarwin(NSString *name) {
+  CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                        (__bridge CFStringRef)name, NULL, NULL,
+                                        true);
+}
+
 @interface LaunchHelperHandler : NSObject <NSExtensionRequestHandling>
 @end
 
@@ -31,6 +41,7 @@
   NSMutableString *log = [NSMutableString string];
   [log appendFormat:@"LaunchHelper extension process started. pid=%d\n\n",
                      getpid()];
+  postDarwin(@"dev.local.ios18probe.LaunchHelper.started");
 
   // Written to the shared App Group container after every step, same
   // "survive a crash" pattern as Probe's own log -- Probe's process is a
@@ -50,6 +61,7 @@
   flush();
 
   void *handle = dlopen([bundlePath fileSystemRepresentation], RTLD_NOW);
+  postDarwin(@"dev.local.ios18probe.LaunchHelper.dlopenDone");
   if (!handle) {
     const char *err = dlerror();
     [log appendFormat:@"dlopen FAILED:\n%s\n", err ? err : "(no error string)"];
@@ -73,12 +85,14 @@
       flush();
       void (*probe_run)(void) = (void (*)(void))sym;
       probe_run();
+      postDarwin(@"dev.local.ios18probe.LaunchHelper.probeRunDone");
       [log appendString:@"\nprobe_run() returned without crashing.\n"];
       flush();
     }
   }
 
   NSLog(@"[LAUNCHHELPER]\n%@", log);
+  postDarwin(@"dev.local.ios18probe.LaunchHelper.reachedEnd");
 
   NSExtensionItem *resultItem = [[NSExtensionItem alloc] init];
   resultItem.userInfo = @{@"log" : log};
