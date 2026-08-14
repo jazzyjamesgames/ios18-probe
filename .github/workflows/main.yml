@@ -32,12 +32,12 @@ jobs:
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
           clang -arch arm64 -isysroot "$SDK" -miphoneos-version-min=15.0 \
                 -fobjc-arc -framework UIKit -framework Foundation \
-                -o Probe Probe/main.m
+                -o ProbeBin Probe/main.m
 
       - name: Assemble .app bundle and .ipa
         run: |
           mkdir -p Payload/Probe.app
-          cp Probe Payload/Probe.app/Probe
+          cp ProbeBin Payload/Probe.app/Probe
           cp Probe/Info.plist Payload/Probe.app/Info.plist
           cp target.dylib Payload/Probe.app/target.dylib
           zip -r Probe-unsigned.ipa Payload
