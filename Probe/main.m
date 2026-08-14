@@ -161,6 +161,34 @@
       [log appendFormat:@"%@\n", outcome];
     }
     flush();
+
+    // The completion block above fires once the process is launched and
+    // connected, not necessarily once its own beginRequestWithExtensionContext:
+    // work (dlopen + probe_run) has finished -- give it a few seconds before
+    // reading back what it wrote to the shared App Group container.
+    [NSThread sleepForTimeInterval:3.0];
+
+    NSURL *groupURL = [[NSFileManager defaultManager]
+        containerURLForSecurityApplicationGroupIdentifier:@"group.dev.local.ios18probe"];
+    [log appendFormat:@"\nApp Group container (Probe's view): %@\n", groupURL];
+    if (groupURL) {
+      NSURL *sharedLogURL =
+          [groupURL URLByAppendingPathComponent:@"launchhelper.log"];
+      NSString *helperLog = [NSString stringWithContentsOfURL:sharedLogURL
+                                                       encoding:NSUTF8StringEncoding
+                                                          error:nil];
+      if (helperLog) {
+        [log appendFormat:@"\n--- LaunchHelper's own log, read back via the "
+                           @"shared App Group container ---\n%@\n"
+                           @"--- end of LaunchHelper's log ---\n",
+                           helperLog];
+      } else {
+        [log appendString:@"\nNo shared log found (App Group entitlement "
+                           @"may not have carried through resigning, or "
+                           @"LaunchHelper hasn't written anything yet)\n"];
+      }
+    }
+    flush();
   }
 
   [log appendFormat:@"\n(written to %@ -- pull it via the Files app)", logPath];

@@ -32,30 +32,49 @@
   [log appendFormat:@"LaunchHelper extension process started. pid=%d\n\n",
                      getpid()];
 
+  // Written to the shared App Group container after every step, same
+  // "survive a crash" pattern as Probe's own log -- Probe's process is a
+  // different process entirely, so this is the only channel back to it.
+  NSURL *groupURL = [[NSFileManager defaultManager]
+      containerURLForSecurityApplicationGroupIdentifier:@"group.dev.local.ios18probe"];
+  NSURL *sharedLogURL = [groupURL URLByAppendingPathComponent:@"launchhelper.log"];
+  void (^flush)(void) = ^{
+    [log writeToURL:sharedLogURL atomically:YES encoding:NSUTF8StringEncoding error:nil];
+  };
+  [log appendFormat:@"App Group container: %@\n\n", groupURL];
+  flush();
+
   NSString *bundlePath = [[NSBundle mainBundle] pathForResource:@"target"
                                                            ofType:@"dylib"];
   [log appendFormat:@"target path: %@\n", bundlePath];
+  flush();
 
   void *handle = dlopen([bundlePath fileSystemRepresentation], RTLD_NOW);
   if (!handle) {
     const char *err = dlerror();
     [log appendFormat:@"dlopen FAILED:\n%s\n", err ? err : "(no error string)"];
+    flush();
   } else {
     [log appendString:@"dlopen SUCCEEDED (constructor already ran as part "
                        @"of the dlopen() call itself).\n\n"];
+    flush();
 
     void *sym = dlsym(handle, "probe_run");
     if (!sym) {
       const char *err = dlerror();
       [log appendFormat:@"dlsym(\"probe_run\") FAILED:\n%s\n",
                          err ? err : "(no error string)"];
+      flush();
     } else {
       [log appendString:@"dlsym(\"probe_run\") found it -- calling now.\n"
-                         @"(if this process dies before completeRequest is "
-                         @"called, it crashed inside probe_run)\n"];
+                         @"(if this process dies before the next flush, it "
+                         @"crashed inside probe_run -- the shared log will "
+                         @"still show progress up to that point)\n"];
+      flush();
       void (*probe_run)(void) = (void (*)(void))sym;
       probe_run();
       [log appendString:@"\nprobe_run() returned without crashing.\n"];
+      flush();
     }
   }
 

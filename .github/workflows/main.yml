@@ -220,7 +220,7 @@ jobs:
                 -Wl,-e,_NSExtensionMain \
                 -o LaunchHelperBin LaunchHelper/main.m
 
-      - name: Assemble .app bundle and .ipa
+      - name: Assemble .app bundle
         run: |
           mkdir -p Payload/Probe.app
           cp ProbeBin Payload/Probe.app/Probe
@@ -232,6 +232,20 @@ jobs:
           cp LaunchHelper/Info.plist Payload/Probe.app/PlugIns/LaunchHelper.appex/Info.plist
           cp target.dylib Payload/Probe.app/PlugIns/LaunchHelper.appex/target.dylib
 
+      - name: Ad-hoc sign with entitlements (App Group intent for AltStore's resign to carry forward)
+        run: |
+          # Ad-hoc (-s -), not a real identity -- AltStore replaces this
+          # signature entirely at install time. The point is embedding the
+          # App Group entitlement so its resigning tool has something to
+          # read and request a matching capability for, same pattern real
+          # sideloaded apps ship with. Nested code signed first.
+          codesign -s - --entitlements LaunchHelper/LaunchHelper.entitlements \
+                --force Payload/Probe.app/PlugIns/LaunchHelper.appex
+          codesign -s - --entitlements Probe/Probe.entitlements \
+                --force Payload/Probe.app
+
+      - name: Zip .ipa
+        run: |
           zip -r Probe-unsigned.ipa Payload
           # also keep the loose .app around for inspection
           cp -R Payload/Probe.app ./Probe.app
