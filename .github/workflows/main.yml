@@ -20,7 +20,7 @@ jobs:
         run: |
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
           clang -arch arm64 -isysroot "$SDK" -miphoneos-version-min=15.0 \
-                -fobjc-arc -framework Foundation \
+                -fobjc-arc -framework UIKit -framework Foundation \
                 -o target_raw target.m
 
       - name: Patch target into a dlopen-able dylib
