@@ -109,39 +109,63 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+      - name: Identify which dmg is the iOS 18.1 RuntimeRoot (metadata only, no mounting)
+        run: |
+          echo "=== images.plist structure ==="
+          python3 -c "
+import plistlib
+with open('/Library/Developer/CoreSimulator/Images/images.plist', 'rb') as f:
+    d = plistlib.load(f)
+print(type(d))
+if isinstance(d, dict):
+    print('top-level keys:', list(d.keys()))
+    import json
+    print(json.dumps(d, indent=2, default=str)[:4000])
+"
+          echo "=== Profiles/Runtimes directory ==="
+          find /Library/Developer/CoreSimulator/Profiles/Runtimes -maxdepth 3 2>&1 || echo "(no such directory)"
+
       - name: Directly mount the iOS 18.1 RuntimeRoot disk image (bypassing simctl entirely)
         timeout-minutes: 5
         run: |
-          # Two attempts at using `simctl boot` to trigger this both hung for
-          # the full 3-minute step timeout with zero output after device
-          # creation -- something in CoreSimulator's own process/XPC handling
-          # during boot, not anything fixable from our own script. Going
-          # straight at the disk image with a plain, synchronous, well-behaved
-          # command instead avoids CoreSimulator's boot machinery altogether.
-          mkdir -p /tmp/mnt
-          for dmg in /Library/Developer/CoreSimulator/Images/*.dmg; do
-            MP="/tmp/mnt/$(basename "$dmg" .dmg)"
-            mkdir -p "$MP"
-            if sudo hdiutil attach -nobrowse -readonly -mountpoint "$MP" "$dmg" > /tmp/attach.log 2>&1; then
-              VER=$(plutil -extract ProductVersion raw "$MP/System/Library/CoreServices/SystemVersion.plist" 2>/dev/null || true)
-              echo "$dmg -> mounted at $MP, ProductVersion=$VER"
-              if [ "$VER" = "18.1" ]; then
-                echo "*** MATCH: $dmg is the iOS 18.1 RuntimeRoot ***"
-                echo "$MP" > /tmp/matched_mountpoint.txt
-                break
-              fi
-              sudo hdiutil detach "$MP" -quiet 2>&1 || true
-            else
-              echo "$dmg -> failed to attach, skipping"
-              cat /tmp/attach.log 2>&1 || true
-            fi
-          done
+          # Two attempts at using `simctl boot` both hung for the full step
+          # timeout with zero output after device creation. Mounting all 18
+          # images and probing for /System/Library/CoreServices/SystemVersion.plist
+          # also came back empty on every one -- that path convention doesn't
+          # exist in these RuntimeRoots at all, and cost ~5 minutes of mount
+          # time to learn. Using the actual metadata this time instead of guessing.
+          DMG_UUID=$(python3 -c "
+import plistlib
+with open('/Library/Developer/CoreSimulator/Images/images.plist', 'rb') as f:
+    d = plistlib.load(f)
+images = d.get('images', d) if isinstance(d, dict) else d
+for entry in (images.values() if isinstance(images, dict) else images):
+    if not isinstance(entry, dict):
+        continue
+    text = str(entry)
+    if 'iOS' in text and '18.1' in text or 'iOS-18-1' in text:
+        uuid = entry.get('imageUUID') or entry.get('UUID') or entry.get('id')
+        if uuid:
+            print(uuid)
+            break
+")
+          echo "resolved DMG_UUID=$DMG_UUID"
 
-          if [ -f /tmp/matched_mountpoint.txt ]; then
-            echo "--- contents of matched RuntimeRoot ---"
-            find "$(cat /tmp/matched_mountpoint.txt)" -maxdepth 3 2>&1 | head -50
+          if [ -z "$DMG_UUID" ]; then
+            echo "no UUID resolved from images.plist -- see the metadata dump in the previous step to fix the parser"
+            exit 0
+          fi
+
+          DMG="/Library/Developer/CoreSimulator/Images/${DMG_UUID}.dmg"
+          MP="/tmp/mnt/iOS18.1"
+          mkdir -p "$MP"
+          if sudo hdiutil attach -nobrowse -readonly -mountpoint "$MP" "$DMG" > /tmp/attach.log 2>&1; then
+            echo "$MP" > /tmp/matched_mountpoint.txt
+            echo "--- contents ---"
+            find "$MP" -maxdepth 3 2>&1 | head -50
           else
-            echo "no dmg matched ProductVersion 18.1 -- listing all mounted versions found above"
+            echo "attach failed:"
+            cat /tmp/attach.log 2>&1
           fi
 
       - name: Dump real Simulator-flavored UIKit/Foundation exported symbols
