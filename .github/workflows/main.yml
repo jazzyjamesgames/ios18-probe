@@ -5,32 +5,30 @@ on:
     branches: [main]
   workflow_dispatch: {}
 
+env:
+  # Pinned explicitly rather than relying on whatever Xcode is implicitly
+  # selected -- the runner's default Xcode.app turned out to be 15.4 /
+  # iPhoneOS17.5.sdk, not the newest available, which would have silently
+  # defeated the point of targeting iOS 18. This is the closest real iOS 18
+  # SDK actually present on the runner.
+  IOS18_DEVELOPER_DIR: /Applications/Xcode_16.1.app/Contents/Developer
+
 jobs:
   build:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
 
-      - name: Show Xcode / SDK info
+      - name: Show selected iOS 18 Xcode / SDK info
         run: |
-          xcodebuild -version
-          xcrun --sdk iphoneos --show-sdk-path
-
-      - name: TEMP -- list all installed Xcode versions and their iOS SDKs
-        run: |
-          ls /Applications | grep -i xcode || true
-          echo '---'
-          for d in /Applications/Xcode*.app; do
-            echo "== $d =="
-            "$d/Contents/Developer/usr/bin/xcodebuild" -version 2>&1 || true
-            ls "$d/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/" 2>&1 || true
-            echo
-          done
+          DEVELOPER_DIR="$IOS18_DEVELOPER_DIR" xcodebuild -version
+          DEVELOPER_DIR="$IOS18_DEVELOPER_DIR" xcrun --sdk iphoneos --show-sdk-path
+          DEVELOPER_DIR="$IOS18_DEVELOPER_DIR" xcrun --sdk iphoneos --show-sdk-version
 
       - name: Compile target (as a normal executable first)
         run: |
-          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
-          clang -arch arm64 -isysroot "$SDK" -miphoneos-version-min=15.0 \
+          SDK=$(DEVELOPER_DIR="$IOS18_DEVELOPER_DIR" xcrun --sdk iphoneos --show-sdk-path)
+          DEVELOPER_DIR="$IOS18_DEVELOPER_DIR" clang -arch arm64 -isysroot "$SDK" -miphoneos-version-min=15.0 \
                 -fobjc-arc -framework UIKit -framework Foundation \
                 -o target_raw target.m
 
@@ -40,8 +38,8 @@ jobs:
 
       - name: Compile Probe app
         run: |
-          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
-          clang -arch arm64 -isysroot "$SDK" -miphoneos-version-min=15.0 \
+          SDK=$(DEVELOPER_DIR="$IOS18_DEVELOPER_DIR" xcrun --sdk iphoneos --show-sdk-path)
+          DEVELOPER_DIR="$IOS18_DEVELOPER_DIR" clang -arch arm64 -isysroot "$SDK" -miphoneos-version-min=15.0 \
                 -fobjc-arc -framework UIKit -framework Foundation \
                 -o ProbeBin Probe/main.m
 
