@@ -8,6 +8,8 @@
 	<string>dev.local.ios18probe.LaunchHelper</string>
 	<key>CFBundleName</key>
 	<string>LaunchHelper</string>
+	<key>CFBundleDisplayName</key>
+	<string>LaunchHelper</string>
 	<key>CFBundlePackageType</key>
 	<string>XPC!</string>
 	<key>CFBundleShortVersionString</key>

@@ -105,18 +105,27 @@
                                                         options:0
                                                           error:nil];
   [log appendFormat:@"PlugIns/ contents on disk: %@\n", plugInContents];
+  // Read the identifier back from the actual installed .appex's own
+  // Info.plist rather than hardcoding it -- AltStore's resigning process
+  // inserts an extra identifier segment (confirmed: it turned
+  // "dev.local.ios18probe.LaunchHelper" into
+  // "dev.local.ios18probe.<TEAM-ISH-ID>.LaunchHelper" on install), so a
+  // literal string here would never match what's actually registered.
+  NSString *installedExtensionId = nil;
   if (plugInContents.count > 0) {
     NSURL *appexURL = plugInContents.firstObject;
     NSURL *appexInfoPlist = [appexURL URLByAppendingPathComponent:@"Info.plist"];
     NSDictionary *appexInfo = [NSDictionary dictionaryWithContentsOfURL:appexInfoPlist];
+    installedExtensionId = appexInfo[@"CFBundleIdentifier"];
     [log appendFormat:@"first .appex's CFBundleIdentifier as installed: %@\n",
-                       appexInfo[@"CFBundleIdentifier"]];
+                       installedExtensionId];
   }
   flush();
 
   NSError *extError = nil;
-  NSExtension *ext = [NSExtension extensionWithIdentifier:@"dev.local.ios18probe.LaunchHelper"
-                                                      error:&extError];
+  NSExtension *ext = installedExtensionId
+      ? [NSExtension extensionWithIdentifier:installedExtensionId error:&extError]
+      : nil;
   if (!ext) {
     [log appendFormat:@"NSExtension init FAILED: %@\n", extError];
     flush();
