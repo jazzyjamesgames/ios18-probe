@@ -112,16 +112,7 @@ jobs:
       - name: Identify which dmg is the iOS 18.1 RuntimeRoot (metadata only, no mounting)
         run: |
           echo "=== images.plist structure ==="
-          python3 -c "
-import plistlib
-with open('/Library/Developer/CoreSimulator/Images/images.plist', 'rb') as f:
-    d = plistlib.load(f)
-print(type(d))
-if isinstance(d, dict):
-    print('top-level keys:', list(d.keys()))
-    import json
-    print(json.dumps(d, indent=2, default=str)[:4000])
-"
+          python3 tools/dump_images_plist.py
           echo "=== Profiles/Runtimes directory ==="
           find /Library/Developer/CoreSimulator/Profiles/Runtimes -maxdepth 3 2>&1 || echo "(no such directory)"
 
@@ -134,21 +125,7 @@ if isinstance(d, dict):
           # also came back empty on every one -- that path convention doesn't
           # exist in these RuntimeRoots at all, and cost ~5 minutes of mount
           # time to learn. Using the actual metadata this time instead of guessing.
-          DMG_UUID=$(python3 -c "
-import plistlib
-with open('/Library/Developer/CoreSimulator/Images/images.plist', 'rb') as f:
-    d = plistlib.load(f)
-images = d.get('images', d) if isinstance(d, dict) else d
-for entry in (images.values() if isinstance(images, dict) else images):
-    if not isinstance(entry, dict):
-        continue
-    text = str(entry)
-    if 'iOS' in text and '18.1' in text or 'iOS-18-1' in text:
-        uuid = entry.get('imageUUID') or entry.get('UUID') or entry.get('id')
-        if uuid:
-            print(uuid)
-            break
-")
+          DMG_UUID=$(python3 tools/find_ios18_dmg.py)
           echo "resolved DMG_UUID=$DMG_UUID"
 
           if [ -z "$DMG_UUID" ]; then
