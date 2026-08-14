@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleExecutable</key>
+	<string>LaunchHelper</string>
+	<key>CFBundleIdentifier</key>
+	<string>dev.local.ios18probe.LaunchHelper</string>
+	<key>CFBundleName</key>
+	<string>LaunchHelper</string>
+	<key>CFBundlePackageType</key>
+	<string>XPC!</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>MinimumOSVersion</key>
+	<string>15.0</string>
+	<!--
+	  Real Apple extension point (normally AR Quick Look), chosen deliberately
+	  over a hidden/undocumented one -- combined with FALSEPREDICATE below it
+	  will never actually fire through the normal system UI, it's only ever
+	  triggered programmatically via NSExtension.beginRequest from our own
+	  host app. Confirmed real (not invented) by reading LiveContainer's own
+	  shipping LiveProcess/Info.plist.
+	-->
+	<key>NSExtension</key>
+	<dict>
+		<key>NSExtensionAttributes</key>
+		<dict>
+			<key>NSExtensionActivationRule</key>
+			<string>FALSEPREDICATE</string>
+		</dict>
+		<key>NSExtensionPointIdentifier</key>
+		<string>com.apple.ar.viewer</string>
+		<key>NSExtensionPrincipalClass</key>
+		<string>LaunchHelperHandler</string>
+	</dict>
+	<!--
+	  Private/undocumented keys (confirmed present in LiveContainer's real,
+	  shipping Info.plist) that make this behave like a genuine standalone
+	  app process rather than a constrained extension lifecycle. This is the
+	  one part of the whole mechanism that isn't public API -- Apple could
+	  rename or drop these without notice.
+	-->
+	<key>XPCService</key>
+	<dict>
+		<key>ServiceType</key>
+		<string>Application</string>
+		<key>_MultipleInstances</key>
+		<true/>
+		<key>_ProcessType</key>
+		<string>App</string>
+	</dict>
+</dict>
+</plist>

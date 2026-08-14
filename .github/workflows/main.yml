@@ -209,12 +209,29 @@ jobs:
                 -fobjc-arc -framework UIKit -framework Foundation \
                 -o ProbeBin Probe/main.m
 
+      - name: Compile LaunchHelper extension
+        run: |
+          SDK=$(DEVELOPER_DIR="$IOS18_DEVELOPER_DIR" xcrun --sdk iphoneos --show-sdk-path)
+          # No main() in LaunchHelper/main.m -- entry point is set explicitly
+          # to Foundation's own real NSExtensionMain, since raw clang has none
+          # of Xcode's implicit app-extension product-type wiring available.
+          DEVELOPER_DIR="$IOS18_DEVELOPER_DIR" clang -arch arm64 -isysroot "$SDK" -miphoneos-version-min=15.0 \
+                -fobjc-arc -framework UIKit -framework Foundation \
+                -Wl,-e,_NSExtensionMain \
+                -o LaunchHelperBin LaunchHelper/main.m
+
       - name: Assemble .app bundle and .ipa
         run: |
           mkdir -p Payload/Probe.app
           cp ProbeBin Payload/Probe.app/Probe
           cp Probe/Info.plist Payload/Probe.app/Info.plist
           cp target.dylib Payload/Probe.app/target.dylib
+
+          mkdir -p Payload/Probe.app/PlugIns/LaunchHelper.appex
+          cp LaunchHelperBin Payload/Probe.app/PlugIns/LaunchHelper.appex/LaunchHelper
+          cp LaunchHelper/Info.plist Payload/Probe.app/PlugIns/LaunchHelper.appex/Info.plist
+          cp target.dylib Payload/Probe.app/PlugIns/LaunchHelper.appex/target.dylib
+
           zip -r Probe-unsigned.ipa Payload
           # also keep the loose .app around for inspection
           cp -R Payload/Probe.app ./Probe.app

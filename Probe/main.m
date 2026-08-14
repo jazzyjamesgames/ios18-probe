@@ -3,8 +3,24 @@
 // trickling in as lazy-bound calls are hit), then dlsym()s and calls
 // probe_run() -- whatever dlerror() says, or wherever it stops, is the
 // actual spec for what to build next.
+//
+// It then also triggers LaunchHelper -- a bundled app-extension -- as a
+// genuinely separate OS process, to test real process isolation (as
+// opposed to everything above, which runs in-process). NSExtension itself
+// is a real but undocumented Foundation class; this forward declaration is
+// adapted directly from LiveContainer's own FoundationPrivate.h, which is
+// how their shipping code uses it too.
 #import <UIKit/UIKit.h>
 #import <dlfcn.h>
+
+@interface NSExtension : NSObject
+@property(nonatomic, strong, readwrite) NSArray *preferredLanguages;
++ (instancetype)extensionWithIdentifier:(NSString *)identifier error:(NSError **)error;
+- (void)beginExtensionRequestWithInputItems:(NSArray *)items completion:(void (^)(NSUUID *))callback;
+- (int)pidForRequestIdentifier:(NSUUID *)identifier;
+- (void)setRequestCancellationBlock:(void (^)(NSUUID *uuid, NSError *error))callback;
+- (void)setRequestInterruptionBlock:(void (^)(NSUUID *))callback;
+@end
 
 @interface AppDelegate : UIResponder <UIApplicationDelegate>
 @property(strong, nonatomic) UIWindow *window;
@@ -77,6 +93,49 @@
       [log appendString:@"\nprobe_run() returned without crashing.\n"];
       flush();
     }
+  }
+
+  [log appendString:@"\n=== Now triggering LaunchHelper as a separate process ===\n"];
+  flush();
+
+  NSError *extError = nil;
+  NSExtension *ext = [NSExtension extensionWithIdentifier:@"dev.local.ios18probe.LaunchHelper"
+                                                      error:&extError];
+  if (!ext) {
+    [log appendFormat:@"NSExtension init FAILED: %@\n", extError];
+    flush();
+  } else {
+    dispatch_semaphore_t sema = dispatch_semaphore_create(0);
+    __block NSString *outcome = nil;
+
+    [ext setRequestCancellationBlock:^(NSUUID *uuid, NSError *error) {
+      outcome = [NSString stringWithFormat:
+                              @"CANCELLED (likely crashed): %@", error];
+      dispatch_semaphore_signal(sema);
+    }];
+
+    NSExtensionItem *item = [NSExtensionItem new];
+    [ext beginExtensionRequestWithInputItems:@[ item ]
+                                   completion:^(NSUUID *identifier) {
+      if (identifier) {
+        int pid = [ext pidForRequestIdentifier:identifier];
+        outcome = [NSString stringWithFormat:
+                                @"LAUNCHED as a real separate process. "
+                                @"uuid=%@ pid=%d", identifier, pid];
+      } else {
+        outcome = @"FAILED: beginExtensionRequestWithInputItems returned nil identifier";
+      }
+      dispatch_semaphore_signal(sema);
+    }];
+
+    long timedOut = dispatch_semaphore_wait(
+        sema, dispatch_time(DISPATCH_TIME_NOW, 20 * NSEC_PER_SEC));
+    if (timedOut) {
+      [log appendString:@"TIMED OUT waiting 20s for extension launch result\n"];
+    } else {
+      [log appendFormat:@"%@\n", outcome];
+    }
+    flush();
   }
 
   [log appendFormat:@"\n(written to %@ -- pull it via the Files app)", logPath];
