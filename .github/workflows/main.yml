@@ -122,7 +122,7 @@ jobs:
           for dmg in /Library/Developer/CoreSimulator/Images/*.dmg; do
             MP="/tmp/mnt/$(basename "$dmg" .dmg)"
             mkdir -p "$MP"
-            if hdiutil attach -nobrowse -readonly -mountpoint "$MP" "$dmg" > /tmp/attach.log 2>&1; then
+            if sudo hdiutil attach -nobrowse -readonly -mountpoint "$MP" "$dmg" > /tmp/attach.log 2>&1; then
               VER=$(plutil -extract ProductVersion raw "$MP/System/Library/CoreServices/SystemVersion.plist" 2>/dev/null || true)
               echo "$dmg -> mounted at $MP, ProductVersion=$VER"
               if [ "$VER" = "18.1" ]; then
@@ -130,7 +130,7 @@ jobs:
                 echo "$MP" > /tmp/matched_mountpoint.txt
                 break
               fi
-              hdiutil detach "$MP" -quiet 2>&1 || true
+              sudo hdiutil detach "$MP" -quiet 2>&1 || true
             else
               echo "$dmg -> failed to attach, skipping"
               cat /tmp/attach.log 2>&1 || true
