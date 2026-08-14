@@ -109,6 +109,40 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+      - name: Boot an iOS 18.1 simulator to force the real RuntimeRoot mount
+        run: |
+          DEVELOPER_DIR="$IOS18_DEVELOPER_DIR" xcrun simctl create ReconDevice "iPhone 15" com.apple.CoreSimulator.SimRuntime.iOS-18-1
+          DEVELOPER_DIR="$IOS18_DEVELOPER_DIR" xcrun simctl boot ReconDevice
+          DEVELOPER_DIR="$IOS18_DEVELOPER_DIR" xcrun simctl bootstatus ReconDevice -b
+          echo "--- now checking the volume again ---"
+          find /Library/Developer/CoreSimulator/Volumes -maxdepth 4 2>&1 | head -50
+
+      - name: Dump real Simulator-flavored UIKit/Foundation exported symbols
+        run: |
+          mkdir -p recon-out2
+          UIKIT_SIM=$(find /Library/Developer/CoreSimulator/Volumes -path "*/UIKit.framework/UIKit" -type f 2>/dev/null | head -1)
+          FOUNDATION_SIM=$(find /Library/Developer/CoreSimulator/Volumes -path "*/Foundation.framework/Foundation" -type f 2>/dev/null | head -1)
+          echo "UIKit: $UIKIT_SIM"
+          echo "Foundation: $FOUNDATION_SIM"
+
+          if [ -n "$UIKIT_SIM" ]; then
+            file "$UIKIT_SIM"
+            nm -g "$UIKIT_SIM" 2>/dev/null > recon-out2/uikit-sim-exported-symbols.txt || true
+            wc -l recon-out2/uikit-sim-exported-symbols.txt
+          fi
+          if [ -n "$FOUNDATION_SIM" ]; then
+            nm -g "$FOUNDATION_SIM" 2>/dev/null > recon-out2/foundation-sim-exported-symbols.txt || true
+            wc -l recon-out2/foundation-sim-exported-symbols.txt
+          fi
+          ls -la recon-out2/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sim-framework-symbols
+          path: recon-out2
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: Compile target (as a normal executable first)
         run: |
           SDK=$(DEVELOPER_DIR="$IOS18_DEVELOPER_DIR" xcrun --sdk iphoneos --show-sdk-path)
