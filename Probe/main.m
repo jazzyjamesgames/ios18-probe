@@ -96,6 +96,22 @@
   }
 
   [log appendString:@"\n=== Now triggering LaunchHelper as a separate process ===\n"];
+
+  NSURL *plugInsURL = [[NSBundle mainBundle] builtInPlugInsURL];
+  [log appendFormat:@"builtInPlugInsURL: %@\n", plugInsURL];
+  NSArray<NSURL *> *plugInContents =
+      [[NSFileManager defaultManager] contentsOfDirectoryAtURL:plugInsURL
+                                     includingPropertiesForKeys:nil
+                                                        options:0
+                                                          error:nil];
+  [log appendFormat:@"PlugIns/ contents on disk: %@\n", plugInContents];
+  if (plugInContents.count > 0) {
+    NSURL *appexURL = plugInContents.firstObject;
+    NSURL *appexInfoPlist = [appexURL URLByAppendingPathComponent:@"Info.plist"];
+    NSDictionary *appexInfo = [NSDictionary dictionaryWithContentsOfURL:appexInfoPlist];
+    [log appendFormat:@"first .appex's CFBundleIdentifier as installed: %@\n",
+                       appexInfo[@"CFBundleIdentifier"]];
+  }
   flush();
 
   NSError *extError = nil;
