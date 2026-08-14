@@ -76,7 +76,7 @@ jobs:
           # Empty stubs: wave 1 deliberately doesn't guess ~90 symbols' real
           # behavior -- dyld's own binding error will name the actual first
           # one CoreSimulator needs.
-          for name in DiskArbitration ROCKit DeviceIdentity CoreSimulatorUtilities CoreServices SimPasteboardPlus; do
+          for name in DiskArbitration ROCKit DeviceIdentity CoreSimulatorUtilities CoreServices SimPasteboardPlus CoreSimDeviceIO; do
             CLANG -o "coresim-stub-out/$name" coresim-stubs/empty_stub.c
           done
           CLANG -o coresim-stub-out/libxcselect.dylib coresim-stubs/empty_stub.c

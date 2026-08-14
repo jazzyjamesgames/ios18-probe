@@ -40,10 +40,15 @@ import sys
 
 LC_SEGMENT_64 = 0x19
 LC_LOAD_DYLIB = 0xC
-LC_LOAD_WEAK_DYLIB = 0x18 | 0x80000000
 LC_BUILD_VERSION = 0x32
-LC_RPATH = 0x1C | 0x80000000
 LC_REQ_DYLD = 0x80000000
+# Base (REQ_DYLD-bit-stripped) values, for comparison against base_cmd below.
+LC_LOAD_WEAK_DYLIB_BASE = 0x18
+LC_REEXPORT_DYLIB_BASE = 0x1F
+# Full on-disk value (bit set), for LC_RPATH which gets *written* as a real
+# cmd field further down -- that one always carries the REQ_DYLD bit for
+# real, so it needs the unstripped constant, not a base_cmd comparison.
+LC_RPATH = 0x1C | 0x80000000
 
 PLATFORM_MACOS = 1
 PLATFORM_IOS = 2
@@ -88,6 +93,11 @@ REDIRECTS = {
     # CoreSimulator actually calls into it
     "/Library/Developer/PrivateFrameworks/CoreSimulator.framework/Versions/A/Frameworks/SimPasteboardPlus.framework/Versions/A/SimPasteboardPlus":
         "@rpath/SimPasteboardPlus",
+    # LC_REEXPORT_DYLIB, not LC_LOAD_DYLIB -- missed entirely by the first
+    # pass of dependency scanning (which only checked LOAD_DYLIB/WEAK_DYLIB).
+    # Found from a real dlopen() failure on device, not from static analysis.
+    "/Library/Developer/PrivateFrameworks/CoreSimulator.framework/Versions/A/Frameworks/CoreSimDeviceIO.framework/Versions/A/CoreSimDeviceIO":
+        "@rpath/CoreSimDeviceIO",
 }
 
 
@@ -169,7 +179,7 @@ def patch(data: bytearray) -> bytearray:
                 n_platform_fixed += 1
                 print(f"platform: macOS -> iOS")
 
-        elif base_cmd in (LC_LOAD_DYLIB, LC_LOAD_WEAK_DYLIB):
+        elif base_cmd in (LC_LOAD_DYLIB, LC_LOAD_WEAK_DYLIB_BASE, LC_REEXPORT_DYLIB_BASE):
             name_off = struct.unpack_from("<I", data, offset + 8)[0]
             raw = data[offset + name_off: offset + cmdsize]
             path = raw.split(b"\x00", 1)[0].decode("utf-8")
