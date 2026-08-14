@@ -45,6 +45,40 @@ static void darwinCallback(CFNotificationCenterRef center, void *observer,
     gReachedEnd = YES;
 }
 
+// Missing-selector discovery. The last device test died on the FIRST
+// unrecognized selector CoreSimulator sent to an NSString constant. Since
+// each round trip here costs a manual install, this catches the whole set
+// in one run instead: +resolveInstanceMethod: is the runtime's last chance
+// to supply a method before it raises, so hooking it lets us log the
+// selector AND install a stub so execution continues to the next one.
+//
+// Each discovery is written to disk immediately rather than at the end --
+// if a later stub's nil return causes a hard (non-ObjC, uncatchable) crash,
+// everything found up to that point still survives on disk.
+//
+// The stub returns nil/0, which is correct-shaped for object, BOOL and
+// integer returns on arm64 but NOT for double/struct returns; a garbled
+// value there would be its own signal.
+static NSMutableArray<NSString *> *gMissingSelectors;
+static NSString *gMissingSelectorsPath;
+
+static id probeMissingSelectorStub(id self, SEL _cmd) { return nil; }
+
+static BOOL probeResolveInstanceMethod(id self, SEL _cmd, SEL sel) {
+  NSString *name = NSStringFromSelector(sel);
+  if (![gMissingSelectors containsObject:name]) {
+    [gMissingSelectors addObject:name];
+    [[gMissingSelectors componentsJoinedByString:@"\n"]
+        writeToFile:gMissingSelectorsPath
+         atomically:YES
+           encoding:NSUTF8StringEncoding
+              error:nil];
+    NSLog(@"[PROBE] missing selector on %@: %@", NSStringFromClass((Class)self), name);
+  }
+  class_addMethod((Class)self, sel, (IMP)probeMissingSelectorStub, "@@:");
+  return YES;
+}
+
 @interface AppDelegate : UIResponder <UIApplicationDelegate>
 @property(strong, nonatomic) UIWindow *window;
 @end
@@ -338,6 +372,24 @@ static void darwinCallback(CFNotificationCenterRef center, void *observer,
     [log appendString:@"\n=== Calling into CoreSimulator's real API ===\n"];
     flush();
 
+    gMissingSelectors = [NSMutableArray array];
+    gMissingSelectorsPath = [docs stringByAppendingPathComponent:@"missing-selectors.txt"];
+    // Installed on the concrete constant-string class (the actual receiver
+    // in the last crash) and on NSString itself, which covers the rest of
+    // the cluster's private subclasses by inheritance. class_addMethod only
+    // fails if the class implements this *itself* (not inherited), which
+    // these don't -- so no risk of clobbering NSObject's global version.
+    for (NSString *clsName in @[ @"__NSCFConstantString", @"NSString" ]) {
+      Class cls = NSClassFromString(clsName);
+      if (!cls) continue;
+      BOOL added = class_addMethod(object_getClass(cls),
+                                    @selector(resolveInstanceMethod:),
+                                    (IMP)probeResolveInstanceMethod, "B@::");
+      [log appendFormat:@"selector-resolution hook on %@: %@\n", clsName,
+                         added ? @"installed" : @"NOT installed (already implemented)"];
+    }
+    flush();
+
     Class serviceContextClass = NSClassFromString(@"SimServiceContext");
     if (!serviceContextClass) {
       [log appendString:@"SimServiceContext class not found (unexpected -- "
@@ -360,14 +412,45 @@ static void darwinCallback(CFNotificationCenterRef center, void *observer,
                          @"sharedServiceContextForDeveloperDir:error:] ...\n"];
       flush();
 
-      typedef id (*SharedServiceContextMsg)(Class, SEL, NSString *, NSError **);
-      SharedServiceContextMsg sharedMsg = (SharedServiceContextMsg)objc_msgSend;
-      NSError *serviceError = nil;
-      id serviceContext = sharedMsg(
-          serviceContextClass,
-          @selector(sharedServiceContextForDeveloperDir:error:),
-          @"/Applications/Xcode.app/Contents/Developer", &serviceError);
-      [log appendFormat:@"result: %@\nerror: %@\n", serviceContext, serviceError];
+      // Last build died here with an uncaught NSInvalidArgumentException:
+      // CoreSimulator's real initWithDeveloperDir:connectionType:error: sent
+      // an unrecognized selector to the __NSCFConstantString we passed as
+      // the developer dir. The crash report REDACTS the selector name (shows
+      // "%s"), but it's a plain catchable ObjC exception, so catching it here
+      // gets us the real name at runtime -- and keeps the app alive so the
+      // log actually reaches disk in a readable state.
+      //
+      // Worth noting why symbol recon never predicted this: ObjC category
+      // methods aren't linker symbols. [str someCategoryMethod] compiles to
+      // a generic objc_msgSend with a selector name, so `nm` can't see it.
+      // Every dependency found so far was linker-visible; this class of gap
+      // is invisible until the code actually runs.
+      @try {
+        typedef id (*SharedServiceContextMsg)(Class, SEL, NSString *, NSError **);
+        SharedServiceContextMsg sharedMsg = (SharedServiceContextMsg)objc_msgSend;
+        NSError *serviceError = nil;
+        id serviceContext = sharedMsg(
+            serviceContextClass,
+            @selector(sharedServiceContextForDeveloperDir:error:),
+            @"/Applications/Xcode.app/Contents/Developer", &serviceError);
+        [log appendFormat:@"result: %@\nerror: %@\n", serviceContext, serviceError];
+        flush();
+      } @catch (NSException *ex) {
+        [log appendFormat:@"\nEXCEPTION CAUGHT (this is the useful part):\n"
+                           @"  name:   %@\n"
+                           @"  reason: %@\n",
+                           ex.name, ex.reason];
+        [log appendFormat:@"  backtrace:\n%@\n",
+                           [ex.callStackSymbols componentsJoinedByString:@"\n"]];
+        flush();
+      }
+
+      [log appendFormat:@"\n--- selectors CoreSimulator wanted but iOS doesn't "
+                         @"have (%lu found) ---\n%@\n",
+                         (unsigned long)gMissingSelectors.count,
+                         gMissingSelectors.count
+                             ? [gMissingSelectors componentsJoinedByString:@"\n"]
+                             : @"(none)"];
       flush();
     }
   }
