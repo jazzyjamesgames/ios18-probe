@@ -119,8 +119,14 @@ jobs:
           # directly for a short window instead of blocking on `bootstatus -b`,
           # which waits for full boot completion and can hang a long time on a
           # CI runner with no real GPU/display backing it.
-          DEVELOPER_DIR="$IOS18_DEVELOPER_DIR" xcrun simctl boot ReconDevice &
+          # Redirected to a file and disowned -- if this inherits the step's
+          # own stdout/stderr, the Actions runner waits for every descendant
+          # process holding that pipe to exit before it'll call the step done,
+          # regardless of whether our own script logic has finished. That's
+          # what actually caused the previous run to hang to the timeout.
+          DEVELOPER_DIR="$IOS18_DEVELOPER_DIR" nohup xcrun simctl boot ReconDevice > /tmp/simctl-boot.log 2>&1 &
           BOOT_PID=$!
+          disown
 
           FOUND=""
           for i in $(seq 1 30); do
