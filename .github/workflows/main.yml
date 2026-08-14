@@ -16,6 +16,17 @@ jobs:
           xcodebuild -version
           xcrun --sdk iphoneos --show-sdk-path
 
+      - name: TEMP -- list all installed Xcode versions and their iOS SDKs
+        run: |
+          ls /Applications | grep -i xcode || true
+          echo '---'
+          for d in /Applications/Xcode*.app; do
+            echo "== $d =="
+            "$d/Contents/Developer/usr/bin/xcodebuild" -version 2>&1 || true
+            ls "$d/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/" 2>&1 || true
+            echo
+          done
+
       - name: Compile target (as a normal executable first)
         run: |
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
