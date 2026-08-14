@@ -82,6 +82,12 @@ jobs:
             grep "(from $lib)" recon-out/coresimulator-undefined-annotated.txt || echo "    (none found)"
           done
 
+          echo "--- previously-uncounted hard deps: libxcselect, libRosetta, CoreServices, ServiceManagement ---"
+          for lib in libxcselect libRosetta CoreServices ServiceManagement; do
+            echo "  -- from $lib --"
+            grep "(from $lib)" recon-out/coresimulator-undefined-annotated.txt || echo "    (none found)"
+          done
+
           echo "=== locating real Simulator-flavored UIKit/Foundation in the mounted iOS 18.1 RuntimeRoot ==="
           VOL=/Library/Developer/CoreSimulator/Volumes/iOS_22B81
           find "$VOL" -maxdepth 2 2>&1 || true
