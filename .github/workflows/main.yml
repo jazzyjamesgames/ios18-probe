@@ -109,50 +109,50 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-      - name: Boot an iOS 18.1 simulator to force the real RuntimeRoot mount
-        timeout-minutes: 3
+      - name: Directly mount the iOS 18.1 RuntimeRoot disk image (bypassing simctl entirely)
+        timeout-minutes: 5
         run: |
-          DEVELOPER_DIR="$IOS18_DEVELOPER_DIR" xcrun simctl create ReconDevice "iPhone 15" com.apple.CoreSimulator.SimRuntime.iOS-18-1
-          # `simctl boot` itself returns as soon as the boot is *initiated*, not
-          # once it's complete -- the RuntimeRoot mount happens very early in
-          # that sequence, well before SpringBoard is up. So poll the filesystem
-          # directly for a short window instead of blocking on `bootstatus -b`,
-          # which waits for full boot completion and can hang a long time on a
-          # CI runner with no real GPU/display backing it.
-          # Redirected to a file and disowned -- if this inherits the step's
-          # own stdout/stderr, the Actions runner waits for every descendant
-          # process holding that pipe to exit before it'll call the step done,
-          # regardless of whether our own script logic has finished. That's
-          # what actually caused the previous run to hang to the timeout.
-          DEVELOPER_DIR="$IOS18_DEVELOPER_DIR" nohup xcrun simctl boot ReconDevice > /tmp/simctl-boot.log 2>&1 &
-          BOOT_PID=$!
-          disown
-
-          FOUND=""
-          for i in $(seq 1 30); do
-            if find /Library/Developer/CoreSimulator/Volumes -path "*/UIKit.framework/UIKit" -type f 2>/dev/null | grep -q .; then
-              echo "mount detected after ${i}0s (approx)"
-              FOUND=1
-              break
+          # Two attempts at using `simctl boot` to trigger this both hung for
+          # the full 3-minute step timeout with zero output after device
+          # creation -- something in CoreSimulator's own process/XPC handling
+          # during boot, not anything fixable from our own script. Going
+          # straight at the disk image with a plain, synchronous, well-behaved
+          # command instead avoids CoreSimulator's boot machinery altogether.
+          mkdir -p /tmp/mnt
+          for dmg in /Library/Developer/CoreSimulator/Images/*.dmg; do
+            MP="/tmp/mnt/$(basename "$dmg" .dmg)"
+            mkdir -p "$MP"
+            if hdiutil attach -nobrowse -readonly -mountpoint "$MP" "$dmg" > /tmp/attach.log 2>&1; then
+              VER=$(plutil -extract ProductVersion raw "$MP/System/Library/CoreServices/SystemVersion.plist" 2>/dev/null || true)
+              echo "$dmg -> mounted at $MP, ProductVersion=$VER"
+              if [ "$VER" = "18.1" ]; then
+                echo "*** MATCH: $dmg is the iOS 18.1 RuntimeRoot ***"
+                echo "$MP" > /tmp/matched_mountpoint.txt
+                break
+              fi
+              hdiutil detach "$MP" -quiet 2>&1 || true
+            else
+              echo "$dmg -> failed to attach, skipping"
+              cat /tmp/attach.log 2>&1 || true
             fi
-            sleep 3
           done
 
-          if [ -z "$FOUND" ]; then
-            echo "mount not detected within polling window -- proceeding anyway, next step will just find nothing"
+          if [ -f /tmp/matched_mountpoint.txt ]; then
+            echo "--- contents of matched RuntimeRoot ---"
+            find "$(cat /tmp/matched_mountpoint.txt)" -maxdepth 3 2>&1 | head -50
+          else
+            echo "no dmg matched ProductVersion 18.1 -- listing all mounted versions found above"
           fi
-
-          echo "--- volume contents now ---"
-          find /Library/Developer/CoreSimulator/Volumes -maxdepth 4 2>&1 | head -50
-
-          # don't block the job waiting for full boot to finish in the background
-          kill "$BOOT_PID" 2>/dev/null || true
 
       - name: Dump real Simulator-flavored UIKit/Foundation exported symbols
         run: |
           mkdir -p recon-out2
-          UIKIT_SIM=$(find /Library/Developer/CoreSimulator/Volumes -path "*/UIKit.framework/UIKit" -type f 2>/dev/null | head -1)
-          FOUNDATION_SIM=$(find /Library/Developer/CoreSimulator/Volumes -path "*/Foundation.framework/Foundation" -type f 2>/dev/null | head -1)
+          SEARCH_ROOT="/tmp/mnt"
+          if [ -f /tmp/matched_mountpoint.txt ]; then
+            SEARCH_ROOT=$(cat /tmp/matched_mountpoint.txt)
+          fi
+          UIKIT_SIM=$(find "$SEARCH_ROOT" -path "*/UIKit.framework/UIKit" -type f 2>/dev/null | head -1)
+          FOUNDATION_SIM=$(find "$SEARCH_ROOT" -path "*/Foundation.framework/Foundation" -type f 2>/dev/null | head -1)
           echo "UIKit: $UIKIT_SIM"
           echo "Foundation: $FOUNDATION_SIM"
 
