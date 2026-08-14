@@ -116,32 +116,43 @@ jobs:
           echo "=== Profiles/Runtimes directory ==="
           find /Library/Developer/CoreSimulator/Profiles/Runtimes -maxdepth 3 2>&1 || echo "(no such directory)"
 
-      - name: Directly mount the iOS 18.1 RuntimeRoot disk image (bypassing simctl entirely)
-        timeout-minutes: 5
+      - name: Mount whatever real Cryptex dmgs actually exist on disk and probe each for UIKit
+        timeout-minutes: 8
         run: |
-          # Two attempts at using `simctl boot` both hung for the full step
-          # timeout with zero output after device creation. Mounting all 18
-          # images and probing for /System/Library/CoreServices/SystemVersion.plist
-          # also came back empty on every one -- that path convention doesn't
-          # exist in these RuntimeRoots at all, and cost ~5 minutes of mount
-          # time to learn. Using the actual metadata this time instead of guessing.
-          DMG=$(python3 tools/find_ios18_dmg.py)
-          echo "resolved DMG path=$DMG"
+          # images.plist's recorded path for the iOS 18.1 entry doesn't exist
+          # on disk -- stale/incomplete metadata, not fixable by parsing it
+          # more carefully. Ground truth is the filesystem: find every real
+          # .dmg under the Cryptex bundle tree and just try each one directly,
+          # confirming by content (does it actually contain UIKit.framework)
+          # rather than by trusting any recorded version label.
+          echo "=== real dmg files under Cryptex/Images/bundle ==="
+          find /Library/Developer/CoreSimulator/Cryptex/Images/bundle -name "*.dmg" 2>&1 | tee /tmp/cryptex_dmgs.txt
 
-          if [ -z "$DMG" ] || [ ! -e "$DMG" ]; then
-            echo "no usable dmg path resolved from images.plist (path='$DMG', exists=$([ -e "$DMG" ] && echo yes || echo no))"
-            exit 0
-          fi
+          i=0
+          while read -r dmg; do
+            [ -z "$dmg" ] && continue
+            i=$((i+1))
+            MP="/tmp/mnt/cryptex$i"
+            mkdir -p "$MP"
+            if sudo hdiutil attach -nobrowse -readonly -mountpoint "$MP" "$dmg" > /tmp/attach.log 2>&1; then
+              HIT=$(find "$MP" -path "*/UIKit.framework/UIKit" -type f 2>/dev/null | head -1)
+              echo "$dmg -> mounted at $MP, UIKit found: ${HIT:-no}"
+              if [ -n "$HIT" ]; then
+                echo "$MP" > /tmp/matched_mountpoint.txt
+                echo "*** MATCH ***"
+                break
+              fi
+              sudo hdiutil detach "$MP" -quiet 2>&1 || true
+            else
+              echo "$dmg -> attach failed"
+            fi
+          done < /tmp/cryptex_dmgs.txt
 
-          MP="/tmp/mnt/iOS18.1"
-          mkdir -p "$MP"
-          if sudo hdiutil attach -nobrowse -readonly -mountpoint "$MP" "$DMG" > /tmp/attach.log 2>&1; then
-            echo "$MP" > /tmp/matched_mountpoint.txt
-            echo "--- contents ---"
-            find "$MP" -maxdepth 3 2>&1 | head -50
+          if [ -f /tmp/matched_mountpoint.txt ]; then
+            echo "--- contents of matched volume ---"
+            find "$(cat /tmp/matched_mountpoint.txt)" -maxdepth 3 2>&1 | head -50
           else
-            echo "attach failed:"
-            cat /tmp/attach.log 2>&1
+            echo "no dmg under Cryptex/Images/bundle contained UIKit.framework"
           fi
 
       - name: Dump real Simulator-flavored UIKit/Foundation exported symbols
