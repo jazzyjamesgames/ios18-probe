@@ -61,21 +61,53 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-      - name: TEMP -- search for launchd_sim / RuntimeOverlay / interposition
+      - name: Symbol-level recon against CoreSimulator and the real mounted RuntimeRoot
         run: |
-          echo "--- searching Xcode.app bundle ---"
-          find /Applications/Xcode_16.1.app -iname "*launchd_sim*" 2>&1 || true
-          find /Applications/Xcode_16.1.app -iname "*RuntimeOverlay*" 2>&1 || true
-          find /Applications/Xcode_16.1.app -iname "*interpos*" 2>&1 || true
-          echo "--- searching CoreSimulator.framework ---"
-          find /Library/Developer/PrivateFrameworks/CoreSimulator.framework -iname "*launchd*" 2>&1 || true
-          find /Library/Developer/PrivateFrameworks/CoreSimulator.framework -iname "*Overlay*" 2>&1 || true
-          echo "--- full contents of CoreSimulator.framework/Resources (if present) ---"
-          find /Library/Developer/PrivateFrameworks/CoreSimulator.framework/Versions/A/Resources -maxdepth 2 2>&1 || true
-          echo "--- checking /Library/Developer/CoreSimulator broadly ---"
-          find /Library/Developer/CoreSimulator -maxdepth 3 2>&1 || true
-          echo "--- checking simctl runtime list (may be empty on fresh runner) ---"
-          DEVELOPER_DIR="$IOS18_DEVELOPER_DIR" xcrun simctl list runtimes 2>&1 || true
+          mkdir -p recon-out
+          CS=/Library/Developer/PrivateFrameworks/CoreSimulator.framework/CoreSimulator
+
+          echo "=== CoreSimulator undefined symbols, annotated by source library (arm64e) ==="
+          nm -m -arch arm64e "$CS" 2>&1 | grep "(from " > recon-out/coresimulator-undefined-annotated.txt || true
+          wc -l recon-out/coresimulator-undefined-annotated.txt
+
+          echo "--- bucket 2: AppKit-sourced symbols actually referenced ---"
+          grep "(from AppKit)" recon-out/coresimulator-undefined-annotated.txt || echo "(none found -- zero static AppKit symbol references)"
+
+          echo "--- bucket 3: DiskArbitration-sourced symbols actually referenced ---"
+          grep "(from DiskArbitration)" recon-out/coresimulator-undefined-annotated.txt || echo "(none found)"
+
+          echo "--- bucket 5: private-framework-sourced symbols actually referenced ---"
+          for lib in ROCKit DeviceIdentity CoreSimulatorUtilities SimPasteboardPlus; do
+            echo "  -- from $lib --"
+            grep "(from $lib)" recon-out/coresimulator-undefined-annotated.txt || echo "    (none found)"
+          done
+
+          echo "=== locating real Simulator-flavored UIKit/Foundation in the mounted iOS 18.1 RuntimeRoot ==="
+          VOL=/Library/Developer/CoreSimulator/Volumes/iOS_22B81
+          find "$VOL" -maxdepth 2 2>&1 || true
+          UIKIT_SIM=$(find "$VOL" -path "*/UIKit.framework/UIKit" -type f 2>/dev/null | head -1)
+          FOUNDATION_SIM=$(find "$VOL" -path "*/Foundation.framework/Foundation" -type f 2>/dev/null | head -1)
+          echo "UIKit: $UIKIT_SIM"
+          echo "Foundation: $FOUNDATION_SIM"
+
+          if [ -n "$UIKIT_SIM" ]; then
+            file "$UIKIT_SIM"
+            nm -g "$UIKIT_SIM" 2>/dev/null > recon-out/uikit-sim-exported-symbols.txt || true
+            wc -l recon-out/uikit-sim-exported-symbols.txt
+          fi
+          if [ -n "$FOUNDATION_SIM" ]; then
+            nm -g "$FOUNDATION_SIM" 2>/dev/null > recon-out/foundation-sim-exported-symbols.txt || true
+            wc -l recon-out/foundation-sim-exported-symbols.txt
+          fi
+
+          ls -la recon-out/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: symbol-recon
+          path: recon-out
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Compile target (as a normal executable first)
         run: |
