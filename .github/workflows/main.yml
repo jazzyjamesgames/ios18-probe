@@ -25,6 +25,42 @@ jobs:
           DEVELOPER_DIR="$IOS18_DEVELOPER_DIR" xcrun --sdk iphoneos --show-sdk-path
           DEVELOPER_DIR="$IOS18_DEVELOPER_DIR" xcrun --sdk iphoneos --show-sdk-version
 
+      - name: Locate and package real CoreSimulator binaries
+        run: |
+          echo "--- checking known CoreSimulator.framework locations ---"
+          ls -la /Library/Developer/PrivateFrameworks/CoreSimulator.framework/ 2>&1 || echo "not at system PrivateFrameworks path"
+          find /Applications/Xcode_16.1.app -iname "CoreSimulator*" -maxdepth 8 2>&1 || true
+
+          mkdir -p coresim-out
+          FW=/Library/Developer/PrivateFrameworks/CoreSimulator.framework
+          if [ -e "$FW/CoreSimulator" ]; then
+            echo "--- found framework binary, copying ---"
+            cp "$FW/CoreSimulator" coresim-out/CoreSimulator
+            file coresim-out/CoreSimulator
+            otool -l coresim-out/CoreSimulator | grep -A4 LC_BUILD_VERSION || true
+          fi
+          if [ -e "$FW/Versions/A/CoreSimulator" ]; then
+            cp "$FW/Versions/A/CoreSimulator" coresim-out/CoreSimulator
+            file coresim-out/CoreSimulator
+          fi
+
+          echo "--- looking for CoreSimulatorService within the framework ---"
+          find "$FW" -iname "CoreSimulatorService" 2>&1 || true
+          SVC=$(find "$FW" -iname "CoreSimulatorService" -type f 2>/dev/null | head -1)
+          if [ -n "$SVC" ]; then
+            cp "$SVC" coresim-out/CoreSimulatorService
+            file coresim-out/CoreSimulatorService
+          fi
+
+          ls -la coresim-out/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coresimulator-binaries
+          path: coresim-out
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: Compile target (as a normal executable first)
         run: |
           SDK=$(DEVELOPER_DIR="$IOS18_DEVELOPER_DIR" xcrun --sdk iphoneos --show-sdk-path)
