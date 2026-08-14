@@ -110,12 +110,37 @@ jobs:
           retention-days: 14
 
       - name: Boot an iOS 18.1 simulator to force the real RuntimeRoot mount
+        timeout-minutes: 3
         run: |
           DEVELOPER_DIR="$IOS18_DEVELOPER_DIR" xcrun simctl create ReconDevice "iPhone 15" com.apple.CoreSimulator.SimRuntime.iOS-18-1
-          DEVELOPER_DIR="$IOS18_DEVELOPER_DIR" xcrun simctl boot ReconDevice
-          DEVELOPER_DIR="$IOS18_DEVELOPER_DIR" xcrun simctl bootstatus ReconDevice -b
-          echo "--- now checking the volume again ---"
+          # `simctl boot` itself returns as soon as the boot is *initiated*, not
+          # once it's complete -- the RuntimeRoot mount happens very early in
+          # that sequence, well before SpringBoard is up. So poll the filesystem
+          # directly for a short window instead of blocking on `bootstatus -b`,
+          # which waits for full boot completion and can hang a long time on a
+          # CI runner with no real GPU/display backing it.
+          DEVELOPER_DIR="$IOS18_DEVELOPER_DIR" xcrun simctl boot ReconDevice &
+          BOOT_PID=$!
+
+          FOUND=""
+          for i in $(seq 1 30); do
+            if find /Library/Developer/CoreSimulator/Volumes -path "*/UIKit.framework/UIKit" -type f 2>/dev/null | grep -q .; then
+              echo "mount detected after ${i}0s (approx)"
+              FOUND=1
+              break
+            fi
+            sleep 3
+          done
+
+          if [ -z "$FOUND" ]; then
+            echo "mount not detected within polling window -- proceeding anyway, next step will just find nothing"
+          fi
+
+          echo "--- volume contents now ---"
           find /Library/Developer/CoreSimulator/Volumes -maxdepth 4 2>&1 | head -50
+
+          # don't block the job waiting for full boot to finish in the background
+          kill "$BOOT_PID" 2>/dev/null || true
 
       - name: Dump real Simulator-flavored UIKit/Foundation exported symbols
         run: |
