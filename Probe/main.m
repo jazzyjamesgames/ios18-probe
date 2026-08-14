@@ -12,6 +12,7 @@
 // how their shipping code uses it too.
 #import <UIKit/UIKit.h>
 #import <dlfcn.h>
+#import <objc/runtime.h>
 
 @interface NSExtension : NSObject
 @property(nonatomic, strong, readwrite) NSArray *preferredLanguages;
@@ -250,11 +251,77 @@ static void darwinCallback(CFNotificationCenterRef center, void *observer,
   if (!coresimHandle) {
     const char *err = dlerror();
     [log appendFormat:@"dlopen FAILED:\n%s\n", err ? err : "(no error string)"];
+    flush();
   } else {
     [log appendString:@"dlopen SUCCEEDED -- CoreSimulator's real binary "
                        @"loaded and fully linked on iOS.\n"];
+    flush();
+
+    // Loaded successfully, but nothing has actually been *called* yet.
+    // Rather than guess selector names from macOS-only tooling we don't
+    // have, ask the Objective-C runtime directly what classes and methods
+    // this image really defines -- ground truth from the actual loaded
+    // binary, not reverse-engineered.
+    [log appendString:@"\n=== Introspecting CoreSimulator's real "
+                       @"Objective-C class surface ===\n"];
+    flush();
+
+    unsigned int imgClassCount = 0;
+    const char *imageName = [coresimPath fileSystemRepresentation];
+    const char **classNames = objc_copyClassNamesForImage(imageName, &imgClassCount);
+    [log appendFormat:@"objc_copyClassNamesForImage(%s) -> %u classes\n",
+                       imageName, imgClassCount];
+    NSMutableArray<NSString *> *allClassNames = [NSMutableArray array];
+    for (unsigned int i = 0; i < imgClassCount; i++) {
+      [allClassNames addObject:[NSString stringWithUTF8String:classNames[i]]];
+    }
+    if (classNames) free(classNames);
+    [allClassNames sortUsingSelector:@selector(compare:)];
+    [log appendFormat:@"%@\n", [allClassNames componentsJoinedByString:@"\n"]];
+    flush();
+
+    // Well-known top-level entry-point class names from prior public
+    // reverse-engineering of simctl/Xcode's use of CoreSimulator, plus
+    // anything the enumeration above found with "ServiceContext" in the
+    // name -- checked independently via NSClassFromString so this still
+    // works even if objc_copyClassNamesForImage's image-name matching
+    // above found nothing.
+    NSMutableArray<NSString *> *toIntrospect = [NSMutableArray arrayWithArray:@[
+      @"SimServiceContext", @"SimDeviceSet", @"SimDevice", @"SimRuntime",
+      @"SimDeviceType"
+    ]];
+    for (NSString *name in allClassNames) {
+      if ([name rangeOfString:@"ServiceContext"].location != NSNotFound &&
+          ![toIntrospect containsObject:name]) {
+        [toIntrospect addObject:name];
+      }
+    }
+
+    [log appendString:@"\n--- method lists for candidate entry-point classes ---\n"];
+    for (NSString *className in toIntrospect) {
+      Class cls = NSClassFromString(className);
+      if (!cls) {
+        [log appendFormat:@"\n%@: NOT FOUND\n", className];
+        continue;
+      }
+      [log appendFormat:@"\n%@:\n", className];
+
+      unsigned int classMethodCount = 0;
+      Method *classMethods = class_copyMethodList(object_getClass(cls), &classMethodCount);
+      for (unsigned int i = 0; i < classMethodCount; i++) {
+        [log appendFormat:@"  + %@\n", NSStringFromSelector(method_getName(classMethods[i]))];
+      }
+      if (classMethods) free(classMethods);
+
+      unsigned int instMethodCount = 0;
+      Method *instMethods = class_copyMethodList(cls, &instMethodCount);
+      for (unsigned int i = 0; i < instMethodCount; i++) {
+        [log appendFormat:@"  - %@\n", NSStringFromSelector(method_getName(instMethods[i]))];
+      }
+      if (instMethods) free(instMethods);
+    }
+    flush();
   }
-  flush();
 
   [log appendFormat:@"\n(written to %@ -- pull it via the Files app)", logPath];
   flush();
