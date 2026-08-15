@@ -1,0 +1,87 @@
+name: runtime-pack
+
+# Packs a real simulator RuntimeRoot into downloadable chunks.
+#
+# Separate from build-probe on purpose: this is slow and heavy (mounts a 6.8GB
+# image, streams out several GB), while build-probe runs on every iteration and
+# needs to stay fast.
+#
+# Why repack at all, rather than have the phone fetch Apple's dmg directly:
+# the dmg is UDIF wrapping an APFS volume. macOS mounts that with one call;
+# iOS has no hdiutil, no mount, and no APFS reader available to an app. Doing
+# it on-device would mean writing a UDIF parser AND an APFS reader. Repacking
+# here turns that into tar+gzip, which is ~150 lines of tar parsing on the
+# device plus zlib, which iOS already ships.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish chunks under"
+        default: "runtime-ios17.2"
+      dry_run:
+        description: "Only measure sizes; do not upload"
+        default: "true"
+
+permissions:
+  contents: write
+
+jobs:
+  pack:
+    runs-on: macos-14
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Report available disk (this is the binding constraint)
+        run: |
+          df -h /
+          echo "=== runtime images present ==="
+          ls -lh /Library/Developer/CoreSimulator/Images/*.dmg 2>/dev/null || echo "(none)"
+
+      - name: Mount the runtime image
+        run: |
+          # Largest image is the iOS runtime. sudo because they're root:wheel.
+          DMG=$(ls -S /Library/Developer/CoreSimulator/Images/*.dmg 2>/dev/null | head -1)
+          echo "dmg: $DMG"
+          ls -lh "$DMG"
+          echo "DMG=$DMG" >> "$GITHUB_ENV"
+
+          mkdir -p /tmp/simrt
+          sudo hdiutil attach "$DMG" -mountpoint /tmp/simrt -nobrowse -readonly
+          RT=$(find /tmp/simrt -maxdepth 6 -name "*.simruntime" | head -1)
+          echo "runtime bundle: $RT"
+          echo "RT=$RT" >> "$GITHUB_ENV"
+
+          echo "=== sizes ==="
+          du -sh "$RT" || true
+          du -sh "$RT/Contents/Resources/RuntimeRoot" || true
+          echo "=== the dyld shared cache (the bulk of a boot) ==="
+          find "$RT/Contents/Resources/RuntimeRoot/System/Library/dyld" -maxdepth 1 -type f \
+            -exec ls -lh {} \; 2>/dev/null | head -10 || echo "(no dyld dir)"
+
+      - name: Create the release to hold the chunks
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.event.inputs.tag }}" \
+            --title "Simulator RuntimeRoot (chunked)" \
+            --notes "tar.gz of a real simulator RuntimeRoot, split into <2GB chunks for on-device download." \
+            || echo "(release already exists, reusing)"
+
+      - name: Pack and upload chunks
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd "$RT/Contents/Resources"
+          # Stream straight from the mounted volume: never materialises the
+          # 16GB tree or the whole archive on the runner's disk.
+          tar czf - RuntimeRoot \
+            | python3 "$GITHUB_WORKSPACE/tools/pack_stream_upload.py" \
+                "${{ github.event.inputs.tag }}" runtimeroot.tar.gz
+
+      - name: Unmount
+        if: always()
+        run: sudo hdiutil detach /tmp/simrt 2>&1 | tail -2 || true
