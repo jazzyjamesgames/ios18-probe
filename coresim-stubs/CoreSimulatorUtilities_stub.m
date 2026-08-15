@@ -98,20 +98,19 @@
 }
 @end
 
-// Third runtime-discovered category. Observed as +[NSString bundleForClass],
-// i.e. sent to whatever class the caller happened to hold -- so it belongs on
-// NSObject, not on any one class. The no-argument spelling (vs Apple's public
-// +[NSBundle bundleForClass:]) makes it a convenience wrapper meaning "the
-// bundle this class came from", which is a real, unambiguous implementation.
-@interface NSObject (CoreSimulatorUtilities)
-+ (NSBundle *)bundleForClass;
-@end
-
-@implementation NSObject (CoreSimulatorUtilities)
-+ (NSBundle *)bundleForClass {
-  return [NSBundle bundleForClass:(Class)self];
-}
-@end
+// NOTE: there is deliberately no +bundleForClass here. It was implemented
+// once, as +[NSObject bundleForClass] returning +[NSBundle bundleForClass:],
+// on the theory that it was a third CoreSimulator category. That was wrong
+// twice over, and the device proved it: "Thread stack size exceeded due to
+// excessive recursion", 12671 frames deep, alternating between the two.
+//
+// bundleForClass (no colon) is a FOUNDATION hook -- +[NSBundle
+// bundleForClass:] asks the class whether it supplies its own bundle. So
+// implementing it (a) called straight back into the caller, and (b) put a
+// hook on NSObject that hijacked bundle lookup for every class in the
+// process, not just CoreSimulator's. It belongs unresolved, exactly like
+// encodeWithOSLogCoder:options:maxLength:, and the probe's selector
+// heuristic now leaves it alone.
 
 // --- family 1: Swift-mangled classes (legacy _TtC ObjC-interop names) ---
 @interface _TtC22CoreSimulatorUtilities20SimCryptexDiskHelper : NSObject

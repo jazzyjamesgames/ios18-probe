@@ -94,16 +94,22 @@ static void probePublish(void) {
   }
 }
 
-// Foundation's own dynamically-resolved / optional selectors. These are
-// probed by the logging and description machinery and are SUPPOSED to go
-// unresolved; stubbing them with a nil return corrupted string formatting
-// badly enough that an earlier run logged "%@NSCONTEXT" in place of real
-// paths and exception names.
-static BOOL probeIsFoundationInternal(NSString *name) {
-  return [name isEqualToString:@"encodeWithOSLogCoder:options:maxLength:"] ||
-         [name isEqualToString:@"_dynamicContextEvaluation:patternString:"] ||
-         [name isEqualToString:@"descriptionWithLocale:"] ||
-         [name isEqualToString:@"redactedDescription"];
+// Only selectors that look like CoreSimulator's own get stubbed. Everything
+// else is logged and left unresolved, which is what Foundation expects.
+//
+// This replaces a blanket "stub everything unknown" policy that was actively
+// harmful: Foundation uses unresolved selectors as OPTIONAL HOOKS, so
+// answering them changes real behavior. Two separate runs proved it --
+// stubbing encodeWithOSLogCoder:options:maxLength: corrupted string
+// formatting ("%@NSCONTEXT" instead of real paths), and answering
+// bundleForClass (a hook +[NSBundle bundleForClass:] consults) recursed
+// 12671 frames until the stack died.
+//
+// "Sim" as the test covers both categories actually found so far --
+// sim_realPath and errorWithSimErrno:localizedDescription: -- and matches
+// none of the Foundation hooks seen in any run.
+static BOOL probeLooksLikeCoreSimulator(NSString *name) {
+  return [name hasPrefix:@"sim_"] || [name containsString:@"Sim"];
 }
 
 static void probeRecordMissing(NSString *description) {
@@ -130,13 +136,7 @@ static BOOL probeResolveInstanceMethod(id self, SEL _cmd, SEL sel) {
   // corrupted string formatting so badly that the log came back with
   // "%@NSCONTEXT" where real paths and exception names should have been.
   // Log everything, but only interfere where we actually mean to.
-  // Policy inverted: stub everything EXCEPT Foundation's own internals.
-  // The previous allowlist (sim_-prefixed only) let +[NSString bundleForClass]
-  // fall through unresolved, and since that abort happens on a dispatch queue
-  // it's uncatchable -- one unknown selector ends the whole run. A blocklist
-  // keeps Foundation's formatting intact while stopping unknown CoreSimulator
-  // methods from being fatal.
-  if (probeIsFoundationInternal(name)) return NO;
+  if (!probeLooksLikeCoreSimulator(name)) return NO;
   class_addMethod((Class)self, sel, (IMP)probeMissingSelectorStub, "@@:");
   return YES;
 }
@@ -155,7 +155,7 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
   // at the first one and any selectors after it stay invisible. A nil return
   // from an NSError factory is at least plausibly-shaped, and whatever
   // breaks downstream of it is its own signal.
-  if (probeIsFoundationInternal(name)) return NO;
+  if (!probeLooksLikeCoreSimulator(name)) return NO;
   class_addMethod(object_getClass((Class)self), sel, (IMP)probeMissingSelectorStub, "@@:");
   return YES;
 }
