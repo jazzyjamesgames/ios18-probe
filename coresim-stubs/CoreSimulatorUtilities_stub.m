@@ -71,6 +71,33 @@
 }
 @end
 
+// Second category found the same way (runtime discovery, invisible to nm).
+// CoreSimulator hit this inside loadValidCoreSimulatorService -- it had
+// already failed to reach the CoreSimulatorService daemon and was building
+// the NSError to describe that failure when the missing factory method
+// aborted the process. So this isn't on a success path: implementing it is
+// what lets the connect failure be *reported* instead of crashing.
+//
+// Domain string is the one CoreSimulator/simctl really uses. errno-style
+// code and a caller-supplied description map onto NSError directly, so this
+// is a real implementation rather than a stub.
+@interface NSError (CoreSimulatorUtilities)
++ (NSError *)errorWithSimErrno:(int)simErrno
+          localizedDescription:(NSString *)localizedDescription;
+@end
+
+@implementation NSError (CoreSimulatorUtilities)
++ (NSError *)errorWithSimErrno:(int)simErrno
+          localizedDescription:(NSString *)localizedDescription {
+  NSDictionary *userInfo = localizedDescription
+      ? @{NSLocalizedDescriptionKey : localizedDescription}
+      : nil;
+  return [NSError errorWithDomain:@"com.apple.CoreSimulator.SimError"
+                             code:simErrno
+                         userInfo:userInfo];
+}
+@end
+
 // --- family 1: Swift-mangled classes (legacy _TtC ObjC-interop names) ---
 @interface _TtC22CoreSimulatorUtilities20SimCryptexDiskHelper : NSObject
 @end
