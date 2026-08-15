@@ -283,6 +283,18 @@ jobs:
 
           # The literal strings near those checks (RuntimeRoot, usr/lib/dyld,
           # System/..., dyld_shared_cache_*) reveal the exact paths probed.
+          # Every sim_-prefixed selector in both binaries, at once. These
+          # category methods have been surfacing one per device round trip
+          # (sim_realPath, sim_packedVersion, sim_cpuType, sim_copyItemAtPath,
+          # sim_realPathHasPrefix, and now sim_reentrantSafeCreateDirectoryAtPath),
+          # each costing a build + install + crash. The full list lets them be
+          # implemented in one pass instead.
+          echo "=== all sim_ selectors in CoreSimulator + CoreSimulatorUtilities ==="
+          { strings -a coresim_thin.bin 2>/dev/null; strings -a csu_thin.bin 2>/dev/null; } \
+            | grep -oE "sim_[A-Za-z0-9_:]+" | sort -u \
+            | tee profile-out/all-sim-selectors.txt || true
+          wc -l profile-out/all-sim-selectors.txt
+
           echo "=== RuntimeRoot-relative path strings in the binary ==="
           strings -a coresim_thin.bin 2>/dev/null \
             | grep -iE "RuntimeRoot|dyld_shared_cache|usr/lib/dyld|/System/Library/Caches|libLaunch|shared_cache" \
