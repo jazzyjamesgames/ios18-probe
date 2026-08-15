@@ -30,13 +30,58 @@ import struct
 import sys
 
 LC_SEGMENT_64, LC_SYMTAB = 0x19, 0x2
+LC_DYLD_CHAINED_FIXUPS = 0x80000034
 
 
 class Image:
     def __init__(self, data):
         self.data = data
         self.sections = []
+        self.imports = []        # bind ordinal -> imported symbol name
         self._parse()
+        self._parse_imports()
+
+    def _parse_imports(self):
+        """Imported symbol names from LC_DYLD_CHAINED_FIXUPS.
+
+        A category's cls field points at a class from another image, so it is
+        not a rebase but a BIND: the slot holds an ordinal into this table
+        rather than an address. Resolving it turns a guess ("methods like
+        -sim_realPath are probably on NSString") into the linker's own answer,
+        _OBJC_CLASS_$_NSString.
+        """
+        ncmds = struct.unpack_from("<I", self.data, 16)[0]
+        off, cf = 32, None
+        for _ in range(ncmds):
+            cmd, cmdsize = struct.unpack_from("<II", self.data, off)
+            if cmd == LC_DYLD_CHAINED_FIXUPS:
+                cf = struct.unpack_from("<I", self.data, off + 8)[0]
+            off += cmdsize
+        if cf is None:
+            return
+        _ver, _starts, imports_off, symbols_off, imports_count, imports_fmt = \
+            struct.unpack_from("<IIIIII", self.data, cf)
+        if imports_fmt != 1:      # only DYLD_CHAINED_IMPORT is handled
+            return
+        for i in range(imports_count):
+            raw = struct.unpack_from("<I", self.data, cf + imports_off + i * 4)[0]
+            name_off = raw >> 9
+            start = cf + symbols_off + name_off
+            end = self.data.index(b"\0", start)
+            self.imports.append(self.data[start:end].decode(errors="replace"))
+
+    def bind_name(self, addr):
+        """If the pointer slot at addr is a bind, return the symbol it binds."""
+        raw = self.at(addr, 8)
+        if not raw:
+            return None
+        val = struct.unpack("<Q", raw)[0]
+        if not (val >> 63) & 1:      # not a bind
+            return None
+        ordinal = val & 0xFFFFFF
+        if ordinal < len(self.imports):
+            return self.imports[ordinal]
+        return None
 
     def _parse(self):
         data = self.data
@@ -145,7 +190,10 @@ def main():
         name = img.cstr(img.ptr(cat)) or "?"
         inst = img.method_names(img.ptr(cat + 16))
         cls = img.method_names(img.ptr(cat + 24))
-        print("category (%s)" % name)
+        target = img.bind_name(cat + 8) or "?"
+        if target.startswith("_OBJC_CLASS_$_"):
+            target = target[len("_OBJC_CLASS_$_"):]
+        print("category %s (%s)" % (target, name))
         for m in inst:
             print("    -%s" % m)
         for m in cls:
