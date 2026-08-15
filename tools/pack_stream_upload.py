@@ -23,11 +23,15 @@ DEFAULT_CHUNK = 1900 * 1024 * 1024  # under GitHub's 2GB asset cap
 
 
 def upload(tag, path):
+    # --repo explicitly: this runs from a scratch directory (the source tree
+    # is a read-only mount), and gh otherwise infers the repo from the CWD's
+    # git dir -- "fatal: not a git repository".
     # --clobber so re-runs replace a partial asset instead of erroring out.
-    subprocess.run(
-        ["gh", "release", "upload", tag, path, "--clobber"],
-        check=True,
-    )
+    cmd = ["gh", "release", "upload", tag, path, "--clobber"]
+    repo = os.environ.get("GITHUB_REPOSITORY")
+    if repo:
+        cmd += ["--repo", repo]
+    subprocess.run(cmd, check=True)
 
 
 def main():
