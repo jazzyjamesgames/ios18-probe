@@ -970,6 +970,59 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
                            rtOk ? @"returned" : @"*** TIMED OUT -- THIS CALL HANGS ***",
                            rtOutcome];
         flush();
+
+        // The add path above returns void and silently drops any runtime it
+        // considers invalid -- which it did (supportedRuntimes stayed empty)
+        // without saying why. -[SimRuntime initWithBundle:error:] is the same
+        // validation the add path calls internally, but it hands the NSError
+        // back instead of swallowing it. So instantiate SimRuntime directly
+        // against the staged bundle to get the actual rejection reason -- that
+        // reason is the real requirement list for the RuntimeRoot download.
+        [log appendString:@"\n=== Instantiating SimRuntime directly for the real error ===\n"];
+        flush();
+        Class simRuntimeClass = NSClassFromString(@"SimRuntime");
+        NSString *rtBundlePath =
+            [runtimesDir stringByAppendingPathComponent:@"iOS 17.2.simruntime"];
+        [log appendFormat:@"SimRuntime class=%@  bundle exists=%d\n",
+                           simRuntimeClass,
+                           [[NSFileManager defaultManager] fileExistsAtPath:rtBundlePath]];
+        flush();
+
+        __block NSString *initOutcome = @"(did not finish)";
+        BOOL initOk = probeRunWithTimeout(30.0, ^{
+          @try {
+            NSBundle *rtBundle = [NSBundle bundleWithPath:rtBundlePath];
+            typedef id (*AllocMsg)(Class, SEL);
+            AllocMsg allocMsg = (AllocMsg)objc_msgSend;
+            id rtAlloc = allocMsg(simRuntimeClass, @selector(alloc));
+
+            typedef id (*InitBundleMsg)(id, SEL, NSBundle *, NSError **);
+            InitBundleMsg initMsg = (InitBundleMsg)objc_msgSend;
+            NSError *initErr = nil;
+            id rt = initMsg(rtAlloc, @selector(initWithBundle:error:), rtBundle, &initErr);
+
+            initOutcome = [NSString stringWithFormat:
+                @"result: %@\n  error: %@", rt, initErr];
+            if (rt) {
+              typedef id (*IdMsg)(id, SEL);
+              IdMsg idMsg = (IdMsg)objc_msgSend;
+              typedef BOOL (*AvailMsg)(id, SEL, NSError **);
+              AvailMsg availMsg = (AvailMsg)objc_msgSend;
+              NSError *availErr = nil;
+              BOOL avail = availMsg(rt, @selector(isAvailableWithError:), &availErr);
+              initOutcome = [initOutcome stringByAppendingFormat:
+                  @"\n  name=%@ version=%@\n  runtimeRootURL=%@\n  available=%d whyNot=%@",
+                  idMsg(rt, @selector(name)), idMsg(rt, @selector(versionString)),
+                  idMsg(rt, @selector(runtimeRootURL)), avail, availErr];
+            }
+          } @catch (NSException *ex) {
+            initOutcome = [NSString stringWithFormat:@"EXCEPTION: %@ -- %@", ex.name, ex.reason];
+          }
+        });
+        [log appendFormat:@"  %@\n  %@\n",
+                           initOk ? @"returned" : @"*** TIMED OUT -- THIS CALL HANGS ***",
+                           initOutcome];
+        flush();
       }
     }
   }
