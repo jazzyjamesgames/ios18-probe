@@ -73,16 +73,48 @@ static id probeMissingSelectorStub(id self, SEL _cmd) { return nil; }
 // clipboard copy, the log write) gets a chance to run in that case, and the
 // Files app can't reach the on-disk log on this install -- so the only way
 // a discovery survives is to publish it the moment it's found.
+// The whole log, not just the selector list, gets republished on every
+// update. Previous runs put ONLY the missing-selector list on the clipboard,
+// so when the process aborted mid-launch everything the log had already
+// established was lost with it.
+static NSMutableString *gLog;
+static NSString *gLogPath;
+
+static void probePublish(void) {
+  NSMutableString *out = [NSMutableString string];
+  if (gLog) [out appendString:gLog];
+  if (gMissingSelectors.count) {
+    [out appendFormat:@"\n\n--- missing selectors seen so far (%lu) ---\n%@\n",
+                      (unsigned long)gMissingSelectors.count,
+                      [gMissingSelectors componentsJoinedByString:@"\n"]];
+  }
+  [UIPasteboard generalPasteboard].string = out;
+  if (gLogPath) {
+    [out writeToFile:gLogPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+  }
+}
+
+// Foundation's own dynamically-resolved / optional selectors. These are
+// probed by the logging and description machinery and are SUPPOSED to go
+// unresolved; stubbing them with a nil return corrupted string formatting
+// badly enough that an earlier run logged "%@NSCONTEXT" in place of real
+// paths and exception names.
+static BOOL probeIsFoundationInternal(NSString *name) {
+  return [name isEqualToString:@"encodeWithOSLogCoder:options:maxLength:"] ||
+         [name isEqualToString:@"_dynamicContextEvaluation:patternString:"] ||
+         [name isEqualToString:@"descriptionWithLocale:"] ||
+         [name isEqualToString:@"redactedDescription"];
+}
+
 static void probeRecordMissing(NSString *description) {
   if ([gMissingSelectors containsObject:description]) return;
   [gMissingSelectors addObject:description];
-  NSString *joined = [gMissingSelectors componentsJoinedByString:@"\n"];
-  [joined writeToFile:gMissingSelectorsPath
-           atomically:YES
-             encoding:NSUTF8StringEncoding
-                error:nil];
-  [UIPasteboard generalPasteboard].string =
-      [NSString stringWithFormat:@"MISSING SELECTORS SO FAR:\n%@", joined];
+  [[gMissingSelectors componentsJoinedByString:@"\n"]
+      writeToFile:gMissingSelectorsPath
+       atomically:YES
+         encoding:NSUTF8StringEncoding
+            error:nil];
+  probePublish();
   NSLog(@"[PROBE] missing selector: %@", description);
 }
 
@@ -98,11 +130,15 @@ static BOOL probeResolveInstanceMethod(id self, SEL _cmd, SEL sel) {
   // corrupted string formatting so badly that the log came back with
   // "%@NSCONTEXT" where real paths and exception names should have been.
   // Log everything, but only interfere where we actually mean to.
-  if ([name hasPrefix:@"sim_"]) {
-    class_addMethod((Class)self, sel, (IMP)probeMissingSelectorStub, "@@:");
-    return YES;
-  }
-  return NO;
+  // Policy inverted: stub everything EXCEPT Foundation's own internals.
+  // The previous allowlist (sim_-prefixed only) let +[NSString bundleForClass]
+  // fall through unresolved, and since that abort happens on a dispatch queue
+  // it's uncatchable -- one unknown selector ends the whole run. A blocklist
+  // keeps Foundation's formatting intact while stopping unknown CoreSimulator
+  // methods from being fatal.
+  if (probeIsFoundationInternal(name)) return NO;
+  class_addMethod((Class)self, sel, (IMP)probeMissingSelectorStub, "@@:");
+  return YES;
 }
 
 // Class methods resolve through a completely separate path
@@ -119,11 +155,9 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
   // at the first one and any selectors after it stay invisible. A nil return
   // from an NSError factory is at least plausibly-shaped, and whatever
   // breaks downstream of it is its own signal.
-  if ([name hasPrefix:@"sim_"] || [NSStringFromClass((Class)self) isEqualToString:@"NSError"]) {
-    class_addMethod(object_getClass((Class)self), sel, (IMP)probeMissingSelectorStub, "@@:");
-    return YES;
-  }
-  return NO;
+  if (probeIsFoundationInternal(name)) return NO;
+  class_addMethod(object_getClass((Class)self), sel, (IMP)probeMissingSelectorStub, "@@:");
+  return YES;
 }
 
 @interface AppDelegate : UIResponder <UIApplicationDelegate>
@@ -182,8 +216,16 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
   // is itself the signal (same idea as the crash-log-as-spec approach, just
   // applied to a log file instead of a system crash report).
   NSMutableString *log = [NSMutableString string];
+  gLog = log;
+  gLogPath = logPath;
+  gMissingSelectors = [NSMutableArray array];
+  gMissingSelectorsPath = [docs stringByAppendingPathComponent:@"missing-selectors.txt"];
+  // Publishes to the clipboard as well as to disk, on every single step --
+  // the clipboard is the only channel that actually reaches us on this
+  // install, and an abort inside a dispatch barrier can end the process at
+  // any point without running anything at the end of launch.
   void (^flush)(void) = ^{
-    [log writeToFile:logPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    probePublish();
   };
 
   NSString *bundlePath = [[NSBundle mainBundle] pathForResource:@"target"
@@ -443,8 +485,9 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
     [log appendString:@"\n=== Calling into CoreSimulator's real API ===\n"];
     flush();
 
-    gMissingSelectors = [NSMutableArray array];
-    gMissingSelectorsPath = [docs stringByAppendingPathComponent:@"missing-selectors.txt"];
+    // (globals already initialized at the top of launch, before anything
+    // could record into them -- re-initializing here would discard whatever
+    // was discovered earlier in the run)
     // Installed on the concrete constant-string class (the actual receiver
     // in the last crash) and on NSString itself, which covers the rest of
     // the cluster's private subclasses by inheritance. class_addMethod only

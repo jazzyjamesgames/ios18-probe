@@ -98,6 +98,21 @@
 }
 @end
 
+// Third runtime-discovered category. Observed as +[NSString bundleForClass],
+// i.e. sent to whatever class the caller happened to hold -- so it belongs on
+// NSObject, not on any one class. The no-argument spelling (vs Apple's public
+// +[NSBundle bundleForClass:]) makes it a convenience wrapper meaning "the
+// bundle this class came from", which is a real, unambiguous implementation.
+@interface NSObject (CoreSimulatorUtilities)
++ (NSBundle *)bundleForClass;
+@end
+
+@implementation NSObject (CoreSimulatorUtilities)
++ (NSBundle *)bundleForClass {
+  return [NSBundle bundleForClass:(Class)self];
+}
+@end
+
 // --- family 1: Swift-mangled classes (legacy _TtC ObjC-interop names) ---
 @interface _TtC22CoreSimulatorUtilities20SimCryptexDiskHelper : NSObject
 @end
