@@ -30,5 +30,14 @@
 	<true/>
 	<key>UIFileSharingEnabled</key>
 	<true/>
+	<!-- Without a launch screen declaration iOS runs the app in compatibility
+	     mode: it hands back a smaller logical screen and letterboxes the
+	     result, which is why the screenshot had thick black bars top and
+	     bottom and why a 9pt font still rendered huge (everything was being
+	     scaled up). An empty UILaunchScreen dict is the modern way to say
+	     "this app handles the real screen size" without shipping a
+	     storyboard. -->
+	<key>UILaunchScreen</key>
+	<dict/>
 </dict>
 </plist>

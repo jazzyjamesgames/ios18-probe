@@ -459,7 +459,10 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
   tv.editable = NO;
   // Smaller than before: these logs run to hundreds of lines and fitting more
   // on screen beats legibility at arm's length.
-  tv.font = [UIFont monospacedSystemFontOfSize:9 weight:UIFontWeightRegular];
+  // 10pt at native resolution. The previous 9 was chosen while the app was
+  // unknowingly letterboxed and scaling everything up; once UILaunchScreen
+  // fixes that, the same number renders much smaller.
+  tv.font = [UIFont monospacedSystemFontOfSize:10 weight:UIFontWeightRegular];
   // Match the view instead of defaulting to white: the screenshot showed a
   // white band where the text view didn't reach, against dark log text.
   tv.backgroundColor = [UIColor systemBackgroundColor];
