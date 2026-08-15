@@ -1040,20 +1040,32 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
         [fm removeItemAtPath:rtBuild error:nil];
         [fm createDirectoryAtPath:rtBuild withIntermediateDirectories:YES
                        attributes:nil error:nil];
-        NSString *wbundle =
-            [rtBuild stringByAppendingPathComponent:@"iOS 17.2.simruntime"];
-        [fm copyItemAtPath:rtBundlePath toPath:wbundle error:nil];
-        NSString *rroot =
-            [wbundle stringByAppendingPathComponent:@"Contents/Resources/RuntimeRoot"];
 
-        // Re-run initWithBundle:error: against the writable bundle and return
-        // a compact result string. Fresh alloc each time -- SimRuntime caches
-        // nothing we've set up yet.
-        NSString *(^validate)(void) = ^NSString *{
+        // CRITICAL: each step gets its OWN bundle directory, with the target
+        // structure laid down BEFORE the bundle is ever accessed. The prior
+        // version reused one path and one +[NSBundle bundleWithPath:] -- which
+        // returns a PROCESS-CACHED bundle that snapshots its resource listing
+        // on first touch, so files added after step 0 were invisible and the
+        // error never changed. A unique, pre-populated path per step sidesteps
+        // the cache entirely. The `setup` block receives the RuntimeRoot path
+        // and builds whatever that step is testing.
+        NSString *(^buildAndValidate)(int, void (^)(NSString *)) =
+            ^NSString *(int step, void (^setup)(NSString *rroot)) {
+          NSString *dir = [rtBuild stringByAppendingPathComponent:
+                                       [NSString stringWithFormat:@"step%d", step]];
+          [fm removeItemAtPath:dir error:nil];
+          [fm createDirectoryAtPath:dir withIntermediateDirectories:YES
+                         attributes:nil error:nil];
+          NSString *wb = [dir stringByAppendingPathComponent:@"iOS 17.2.simruntime"];
+          [fm copyItemAtPath:rtBundlePath toPath:wb error:nil];
+          NSString *rr =
+              [wb stringByAppendingPathComponent:@"Contents/Resources/RuntimeRoot"];
+          if (setup) setup(rr);
+
           __block NSString *r = @"(no result)";
           probeRunWithTimeout(20.0, ^{
             @try {
-              NSBundle *b = [NSBundle bundleWithPath:wbundle];
+              NSBundle *b = [NSBundle bundleWithPath:wb];  // fresh path, no stale cache
               id a = ((id (*)(Class, SEL))objc_msgSend)(simRuntimeClass, @selector(alloc));
               NSError *e = nil;
               id rt = ((id (*)(id, SEL, NSBundle *, NSError **))objc_msgSend)(
@@ -1075,49 +1087,53 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
           return r;
         };
 
-        [log appendString:@"\n=== Progressive RuntimeRoot construction ===\n"];
-        [log appendFormat:@"step 0 (copied bundle, no RuntimeRoot): %@\n", validate()];
-        flush();
-
-        // step 1: empty RuntimeRoot directory
-        [fm createDirectoryAtPath:rroot withIntermediateDirectories:YES
-                       attributes:nil error:nil];
-        [log appendFormat:@"step 1 (+ empty RuntimeRoot/): %@\n", validate()];
-        flush();
-
-        // step 2: the marker file the binary strings pointed at
-        NSString *csDir =
-            [rroot stringByAppendingPathComponent:@"System/Library/CoreServices"];
-        [fm createDirectoryAtPath:csDir withIntermediateDirectories:YES
-                       attributes:nil error:nil];
-        NSDictionary *sysVersion = @{
-          @"ProductName" : @"iPhone OS",
-          @"ProductVersion" : @"17.2",
-          @"ProductBuildVersion" : @"21C62",
-          @"ProductCopyright" : @"1983-2023 Apple Inc.",
+        void (^makeSystemVersion)(NSString *) = ^(NSString *rr) {
+          NSString *csDir =
+              [rr stringByAppendingPathComponent:@"System/Library/CoreServices"];
+          [fm createDirectoryAtPath:csDir withIntermediateDirectories:YES
+                         attributes:nil error:nil];
+          NSDictionary *sysVersion = @{
+            @"ProductName" : @"iPhone OS",
+            @"ProductVersion" : @"17.2",
+            @"ProductBuildVersion" : @"21C62",
+            @"ProductCopyright" : @"1983-2023 Apple Inc.",
+          };
+          [sysVersion writeToFile:[csDir stringByAppendingPathComponent:@"SystemVersion.plist"]
+                       atomically:YES];
         };
-        [sysVersion writeToFile:[csDir stringByAppendingPathComponent:@"SystemVersion.plist"]
-                     atomically:YES];
-        [log appendFormat:@"step 2 (+ SystemVersion.plist): %@\n", validate()];
+
+        [log appendString:@"\n=== Progressive RuntimeRoot construction "
+                           @"(fresh bundle path per step) ===\n"];
+
+        [log appendFormat:@"step 0 (no RuntimeRoot): %@\n",
+            buildAndValidate(0, nil)];
         flush();
 
-        // step 3: plausible dyld / liblaunch skeleton the boot strings mention
-        NSString *usrLib = [rroot stringByAppendingPathComponent:@"usr/lib"];
-        [fm createDirectoryAtPath:usrLib withIntermediateDirectories:YES
-                       attributes:nil error:nil];
-        [[NSData data] writeToFile:[usrLib stringByAppendingPathComponent:@"dyld"]
-                        atomically:YES];
-        [[NSData data] writeToFile:[usrLib stringByAppendingPathComponent:@"liblaunch_sim.dylib"]
-                        atomically:YES];
-        [log appendFormat:@"step 3 (+ usr/lib/dyld + liblaunch_sim.dylib): %@\n", validate()];
+        [log appendFormat:@"step 1 (+ empty RuntimeRoot/): %@\n",
+            buildAndValidate(1, ^(NSString *rr) {
+              [fm createDirectoryAtPath:rr withIntermediateDirectories:YES
+                             attributes:nil error:nil];
+            })];
         flush();
 
-        [log appendFormat:@"\nfinal RuntimeRoot tree:\n%@\n",
-            [[[fm subpathsOfDirectoryAtPath:
-                   [wbundle stringByAppendingPathComponent:@"Contents/Resources/RuntimeRoot"]
-                                      error:nil]
-                sortedArrayUsingSelector:@selector(compare:)]
-               componentsJoinedByString:@"\n"]];
+        [log appendFormat:@"step 2 (+ SystemVersion.plist): %@\n",
+            buildAndValidate(2, ^(NSString *rr) {
+              makeSystemVersion(rr);
+            })];
+        flush();
+
+        [log appendFormat:@"step 3 (+ dyld + liblaunch skeleton): %@\n",
+            buildAndValidate(3, ^(NSString *rr) {
+              makeSystemVersion(rr);
+              NSString *usrLib = [rr stringByAppendingPathComponent:@"usr/lib"];
+              [fm createDirectoryAtPath:usrLib withIntermediateDirectories:YES
+                             attributes:nil error:nil];
+              [[NSData data] writeToFile:[usrLib stringByAppendingPathComponent:@"dyld"]
+                              atomically:YES];
+              [[NSData data] writeToFile:
+                  [usrLib stringByAppendingPathComponent:@"liblaunch_sim.dylib"]
+                              atomically:YES];
+            })];
         flush();
       }
     }
