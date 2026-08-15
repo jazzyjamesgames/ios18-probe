@@ -417,6 +417,8 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
 // pasteboard is: it needs no entitlement, no file browser, and no
 // successful app launch beyond this point.
 @property(strong, nonatomic) NSString *logText;
+@property(strong, nonatomic) UIProgressView *progressBar;
+@property(strong, nonatomic) UILabel *progressLabel;
 @end
 
 @implementation AppDelegate
@@ -468,6 +470,31 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
                   action:@selector(fetchRuntimeTapped:)
         forControlEvents:UIControlEventTouchUpInside];
   [vc.view addSubview:fetchButton];
+
+  // Progress readout. A multi-GB download over a phone connection is a long
+  // silence otherwise, with no way to tell "working" from "hung" -- and this
+  // project has produced enough silent hangs to make that distinction worth
+  // showing.
+  UIProgressView *bar =
+      [[UIProgressView alloc] initWithProgressViewStyle:UIProgressViewStyleDefault];
+  bar.frame = CGRectMake(20, bounds.size.height - 178, bounds.size.width - 40, 4);
+  bar.autoresizingMask =
+      UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleTopMargin;
+  bar.progress = 0;
+  [vc.view addSubview:bar];
+  self.progressBar = bar;
+
+  UILabel *progressLabel =
+      [[UILabel alloc] initWithFrame:CGRectMake(20, bounds.size.height - 200,
+                                                bounds.size.width - 40, 18)];
+  progressLabel.autoresizingMask =
+      UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleTopMargin;
+  progressLabel.font = [UIFont monospacedDigitSystemFontOfSize:12
+                                                        weight:UIFontWeightRegular];
+  progressLabel.textColor = [UIColor secondaryLabelColor];
+  progressLabel.text = @"idle";
+  [vc.view addSubview:progressLabel];
+  self.progressLabel = progressLabel;
 
   self.window.rootViewController = vc;
   [self.window makeKeyAndVisible];
@@ -1613,10 +1640,26 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
   [sender setTitle:@"DOWNLOADING..." forState:UIControlStateNormal];
   sender.enabled = NO;
 
-  NSString *docs = NSSearchPathForDirectoriesInDomains(
-                       NSDocumentDirectory, NSUserDomainMask, YES)
-                       .firstObject;
-  NSString *dest = [docs stringByAppendingPathComponent:@"rt-download"];
+  // Application Support, not Documents and not Caches:
+  //   - Documents is backed up to iCloud, and a ~16GB re-downloadable tree
+  //     has no business in someone's backup.
+  //   - Caches can be purged by the OS under disk pressure, which would make
+  //     an installed runtime silently disappear.
+  // The fetcher additionally marks it excluded from backup.
+  //
+  // CoreSimulator imposes no fixed location -- every path so far (developer
+  // dir, device set, profile dirs) was one we passed in explicitly. The only
+  // real requirement is the BUNDLE SHAPE: SimRuntime derives runtimeRootURL
+  // from its own bundle, so RuntimeRoot must land at
+  // <x>.simruntime/Contents/Resources/RuntimeRoot. Extract directly into that
+  // shape and registration can point at the parent directory.
+  NSString *appSupport = NSSearchPathForDirectoriesInDomains(
+                             NSApplicationSupportDirectory, NSUserDomainMask, YES)
+                             .firstObject;
+  NSString *runtimesDir = [appSupport stringByAppendingPathComponent:@"SimRuntimes"];
+  NSString *bundleDir =
+      [runtimesDir stringByAppendingPathComponent:@"iOS 17.2.simruntime"];
+  NSString *dest = [bundleDir stringByAppendingPathComponent:@"Contents/Resources"];
 
   // Off the main thread: this is network + multi-GB disk work, and blocking
   // the main thread is what got the app watchdog-killed earlier in this
@@ -1634,20 +1677,64 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
     };
 
     NSError *err = nil;
-    BOOL ok = [RuntimeFetcher fetchTag:@"runtime-ios17.2"
-                                  into:dest
-                              progress:^(NSString *line) {
-                                [out appendFormat:@"%@\n", line];
-                                publish();
-                              }
-                                 error:&err];
+    BOOL ok = [RuntimeFetcher
+        fetchTag:@"runtime-ios17.2"
+            into:dest
+        progress:^(double fraction, NSString *status) {
+          // Fires per network callback; keep it to the bar/label and off the
+          // transcript, which the log block handles instead.
+          dispatch_async(dispatch_get_main_queue(), ^{
+            if (fraction >= 0) {
+              [self.progressBar setProgress:(float)fraction animated:YES];
+            }
+            self.progressLabel.text = status;
+          });
+        }
+             log:^(NSString *line) {
+               [out appendFormat:@"%@\n", line];
+               publish();
+             }
+           error:&err];
 
     [out appendFormat:@"\nresult: %@\n", ok ? @"SUCCESS" : @"FAILED"];
     if (err) [out appendFormat:@"error: %@\n", err.localizedDescription];
 
+    // Complete the bundle: the download supplies RuntimeRoot, but a runtime
+    // is only loadable with its Info.plist/profile.plist, and device creation
+    // also needs SampleContent. Copied AFTER fetching, since the fetcher wipes
+    // its destination first.
+    if (ok) {
+      NSFileManager *fm2 = [NSFileManager defaultManager];
+      NSString *staged = [[[NSBundle mainBundle] bundlePath]
+          stringByAppendingPathComponent:@"RealProfiles/Runtimes/iOS 17.2.simruntime"];
+      NSString *sample = [[[NSBundle mainBundle] bundlePath]
+          stringByAppendingPathComponent:@"RealProfiles/SampleContent"];
+
+      [fm2 copyItemAtPath:[staged stringByAppendingPathComponent:@"Contents/Info.plist"]
+                   toPath:[bundleDir stringByAppendingPathComponent:@"Contents/Info.plist"]
+                    error:NULL];
+      [fm2 copyItemAtPath:[staged stringByAppendingPathComponent:@"Contents/Resources/profile.plist"]
+                   toPath:[dest stringByAppendingPathComponent:@"profile.plist"]
+                    error:NULL];
+      [fm2 copyItemAtPath:sample
+                   toPath:[dest stringByAppendingPathComponent:@"SampleContent"]
+                    error:NULL];
+
+      [out appendFormat:@"\nassembled bundle at:\n  %@\n", bundleDir];
+      for (NSString *rel in @[ @"Contents/Info.plist", @"Contents/Resources/profile.plist",
+                               @"Contents/Resources/RuntimeRoot",
+                               @"Contents/Resources/SampleContent" ]) {
+        NSString *full = [bundleDir stringByAppendingPathComponent:rel];
+        [out appendFormat:@"  %@ %@\n",
+                          [fm2 fileExistsAtPath:full] ? @"ok  " : @"MISS", rel];
+      }
+      [out appendFormat:@"\nregister with:\n  %@\n", runtimesDir];
+    }
+
     // Show what actually landed, so success is verifiable rather than asserted.
     NSFileManager *fm = [NSFileManager defaultManager];
     NSString *rr = [dest stringByAppendingPathComponent:@"RuntimeRoot"];
+    (void)rr;
     NSArray *subpaths = [fm subpathsOfDirectoryAtPath:rr error:NULL];
     [out appendFormat:@"\n%lu paths under RuntimeRoot/\n",
                       (unsigned long)subpaths.count];

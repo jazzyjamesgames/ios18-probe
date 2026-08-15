@@ -8,11 +8,18 @@
 // serialises its steps, and a callback-based API would only complicate that.
 @interface RuntimeFetcher : NSObject
 
-// Returns YES on success. `progress` is called with human-readable status
-// lines (already newline-free) and may be nil.
+// Returns YES on success.
+//
+// `progress` reports overall completion in [0,1] plus a one-line status, and
+// may be called very frequently -- callers should throttle UI updates rather
+// than assume otherwise. `fraction` is negative when the total isn't known
+// yet (before the manifest is read).
+//
+// `log` receives durable, one-per-event lines worth keeping in the transcript.
 + (BOOL)fetchTag:(NSString *)tag
              into:(NSString *)destDir
-         progress:(void (^)(NSString *line))progress
+         progress:(void (^)(double fraction, NSString *status))progress
+              log:(void (^)(NSString *line))log
             error:(NSError **)error;
 
 @end
