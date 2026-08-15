@@ -42,6 +42,34 @@
 #import <Foundation/Foundation.h>
 #import <xpc/xpc.h>
 #import <os/log.h>
+#import <stdlib.h>
+#import <limits.h>
+
+// --- family 0: Objective-C categories ---
+// Invisible to the nm-based symbol recon that found every other dependency
+// in this file: category methods aren't linker symbols, they're just
+// selectors passed to objc_msgSend. Discovered only by running the code --
+// -[SimServiceContext initWithDeveloperDir:connectionType:error:] called
+// -[NSString sim_realPath] and threw "Failed to get realpath for developer
+// directory" when it came back nil.
+//
+// Real implementation, not a stub: the name, the caller's error message,
+// and the sim_ prefix together make this unambiguously a realpath(3)
+// wrapper. Returning nil for a nonexistent path is the correct behavior
+// (it's exactly what the caller checks for), not a failure mode.
+@interface NSString (CoreSimulatorUtilities)
+- (NSString *)sim_realPath;
+@end
+
+@implementation NSString (CoreSimulatorUtilities)
+- (NSString *)sim_realPath {
+  char resolved[PATH_MAX];
+  if (realpath([self fileSystemRepresentation], resolved) != NULL) {
+    return [NSString stringWithUTF8String:resolved];
+  }
+  return nil;
+}
+@end
 
 // --- family 1: Swift-mangled classes (legacy _TtC ObjC-interop names) ---
 @interface _TtC22CoreSimulatorUtilities20SimCryptexDiskHelper : NSObject

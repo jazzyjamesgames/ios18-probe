@@ -76,8 +76,19 @@ static BOOL probeResolveInstanceMethod(id self, SEL _cmd, SEL sel) {
               error:nil];
     NSLog(@"[PROBE] missing selector on %@: %@", NSStringFromClass((Class)self), name);
   }
-  class_addMethod((Class)self, sel, (IMP)probeMissingSelectorStub, "@@:");
-  return YES;
+  // Only stub CoreSimulator's own category methods. The previous run stubbed
+  // EVERY unresolved selector, including Foundation internals that are
+  // supposed to be dynamically resolved or to fail
+  // (encodeWithOSLogCoder:options:maxLength:,
+  // _dynamicContextEvaluation:patternString:) -- returning nil for those
+  // corrupted string formatting so badly that the log came back with
+  // "%@NSCONTEXT" where real paths and exception names should have been.
+  // Log everything, but only interfere where we actually mean to.
+  if ([name hasPrefix:@"sim_"]) {
+    class_addMethod((Class)self, sel, (IMP)probeMissingSelectorStub, "@@:");
+    return YES;
+  }
+  return NO;
 }
 
 @interface AppDelegate : UIResponder <UIApplicationDelegate>
@@ -450,6 +461,25 @@ static BOOL probeResolveInstanceMethod(id self, SEL _cmd, SEL sel) {
       // a generic objc_msgSend with a selector name, so `nm` can't see it.
       // Every dependency found so far was linker-visible; this class of gap
       // is invisible until the code actually runs.
+      // Last run passed /Applications/Xcode.app/Contents/Developer, which
+      // obviously doesn't exist on iOS -- sim_realPath (now implemented for
+      // real in the CoreSimulatorUtilities stub) correctly returns nil for a
+      // nonexistent path, so that alone would still throw. Give it a real
+      // directory inside our own sandbox instead. Empty for now: whatever
+      // CoreSimulator looks for underneath is the next thing to learn.
+      NSString *developerDir = [docs stringByAppendingPathComponent:@"DeveloperDir"];
+      NSError *mkdirError = nil;
+      [[NSFileManager defaultManager]
+          createDirectoryAtPath:[developerDir stringByAppendingPathComponent:@"Platforms"]
+        withIntermediateDirectories:YES
+                     attributes:nil
+                          error:&mkdirError];
+      [log appendFormat:@"developer dir: %@\n  exists=%d  mkdirError=%@\n",
+                         developerDir,
+                         [[NSFileManager defaultManager] fileExistsAtPath:developerDir],
+                         mkdirError];
+      flush();
+
       @try {
         typedef id (*SharedServiceContextMsg)(Class, SEL, NSString *, NSError **);
         SharedServiceContextMsg sharedMsg = (SharedServiceContextMsg)objc_msgSend;
@@ -457,7 +487,7 @@ static BOOL probeResolveInstanceMethod(id self, SEL _cmd, SEL sel) {
         id serviceContext = sharedMsg(
             serviceContextClass,
             @selector(sharedServiceContextForDeveloperDir:error:),
-            @"/Applications/Xcode.app/Contents/Developer", &serviceError);
+            developerDir, &serviceError);
         [log appendFormat:@"result: %@\nerror: %@\n", serviceContext, serviceError];
         flush();
       } @catch (NSException *ex) {
@@ -480,7 +510,8 @@ static BOOL probeResolveInstanceMethod(id self, SEL _cmd, SEL sel) {
     }
   }
 
-  [log appendFormat:@"\n(written to %@ -- pull it via the Files app)", logPath];
+  [log appendFormat:@"\n(also written to %@, though the Files app can't see "
+                     @"it on this install -- use the clipboard button)", logPath];
   flush();
 
   tv.text = log;
