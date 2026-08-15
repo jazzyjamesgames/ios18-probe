@@ -703,7 +703,8 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
   const CGFloat pad = 8, btnH = 30, labelH = 12, barH = 3;
   const CGFloat copyY = bounds.size.height - bottomInset - btnH;
   const CGFloat fetchY = copyY - 4 - btnH;
-  const CGFloat barY = fetchY - 6 - barH;
+  const CGFloat jitY = fetchY - 4 - btnH;
+  const CGFloat barY = jitY - 6 - barH;
   const CGFloat labelY = barY - 2 - labelH;
   const CGFloat chromeTop = labelY - 4;
 
@@ -756,6 +757,26 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
                   action:@selector(fetchRuntimeTapped:)
         forControlEvents:UIControlEventTouchUpInside];
   [vc.view addSubview:fetchButton];
+
+  // The code-loading test has to be re-runnable on demand, because JIT cannot
+  // be present when it would otherwise run. SideStore enables JIT by attaching
+  // to an ALREADY-RUNNING process, while everything else here happens during
+  // launch -- so the automatic run always reports CS_DEBUGGED=0 regardless of
+  // whether JIT was later enabled. Launch, enable JIT, then tap this.
+  UIButton *jitButton = [UIButton buttonWithType:UIButtonTypeSystem];
+  jitButton.frame = CGRectMake(pad, jitY, bounds.size.width - 2 * pad, btnH);
+  jitButton.autoresizingMask =
+      UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleTopMargin;
+  jitButton.backgroundColor = [UIColor systemPurpleColor];
+  jitButton.tintColor = [UIColor whiteColor];
+  jitButton.titleLabel.font = [UIFont boldSystemFontOfSize:13];
+  jitButton.layer.cornerRadius = 6;
+  [jitButton setTitle:@"RE-TEST CODE LOADING (after JIT)"
+             forState:UIControlStateNormal];
+  [jitButton addTarget:self
+                action:@selector(testCodeLoadingTapped:)
+      forControlEvents:UIControlEventTouchUpInside];
+  [vc.view addSubview:jitButton];
 
   // Progress readout. A multi-GB download over a phone connection is a long
   // silence otherwise, with no way to tell "working" from "hung" -- and this
@@ -2130,6 +2151,31 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
   });  // end background probe block
 
   return YES;
+}
+
+// Re-runs section F against the live process. The automatic run happens during
+// launch, before JIT can possibly be attached, so its CS_DEBUGGED=0 says
+// nothing about whether JIT is available -- only this does.
+- (void)testCodeLoadingTapped:(UIButton *)sender {
+  [sender setTitle:@"TESTING..." forState:UIControlStateNormal];
+  sender.enabled = NO;
+
+  NSString *appSupport = NSSearchPathForDirectoriesInDomains(
+                             NSApplicationSupportDirectory, NSUserDomainMask, YES)
+                             .firstObject;
+  NSString *runtimeRoot = [appSupport stringByAppendingPathComponent:
+      @"SimRuntimes/iOS 17.2.simruntime/Contents/Resources/RuntimeRoot"];
+
+  NSMutableString *out = [NSMutableString string];
+  [out appendString:@"\n\n=== RE-TEST, on demand (JIT may now be attached) ===\n"];
+  probeTestCodeLoading(out, runtimeRoot);
+
+  [gLog appendString:out];
+  probePublish();
+
+  [sender setTitle:@"RE-TEST CODE LOADING (after JIT)"
+          forState:UIControlStateNormal];
+  sender.enabled = YES;
 }
 
 - (void)fetchRuntimeTapped:(UIButton *)sender {
