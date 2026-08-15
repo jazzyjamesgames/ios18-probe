@@ -1319,67 +1319,114 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
         [log appendString:@"\n=== Creating a SimDevice ===\n"];
         flush();
 
+        // Split into separately-timed, separately-flushed calls. The first
+        // version ran all four in one block and the log ended at the section
+        // header with no indication which died. Each sub-step now publishes
+        // before it runs, so the last line printed names the culprit without
+        // needing a crash report.
         NSString *step5Dir = [rtBuild stringByAppendingPathComponent:@"step5"];
-        __block NSString *createOutcome = @"(did not finish)";
-        BOOL createOk = probeRunWithTimeout(60.0, ^{
-          @try {
-            typedef id (*IdMsg)(id, SEL);
-            IdMsg idMsg = (IdMsg)objc_msgSend;
+        typedef id (*IdMsg)(id, SEL);
+        IdMsg idMsg2 = (IdMsg)objc_msgSend;
 
+        // A: register the AVAILABLE runtime into the context. Prime suspect:
+        // the earlier call was a no-op because that bundle was invalid, so
+        // this is the first time real registration machinery actually runs.
+        [log appendString:@"A. supportedRuntimesAddProfilesAtPath (30s)...\n"];
+        flush();
+        __block NSString *outA = @"(did not finish)";
+        BOOL okA = probeRunWithTimeout(30.0, ^{
+          @try {
             ((void (*)(id, SEL, NSString *, BOOL))objc_msgSend)(
                 liveContext,
                 @selector(supportedRuntimesAddProfilesAtPath:createDefaultDevicesIfNeeded:),
                 step5Dir, NO);
+            outA = @"ok";
+          } @catch (NSException *ex) {
+            outA = [NSString stringWithFormat:@"EXCEPTION: %@ -- %@", ex.name, ex.reason];
+          }
+        });
+        [log appendFormat:@"   %@ %@\n", okA ? @"returned" : @"*** TIMED OUT ***", outA];
+        flush();
 
-            id runtimes = idMsg(liveContext, @selector(supportedRuntimes));
-            id types = idMsg(liveContext, @selector(supportedDeviceTypes));
-            createOutcome = [NSString stringWithFormat:
-                @"context runtimes: %@\n  context deviceTypes: %@", runtimes, types];
-
-            if (![runtimes respondsToSelector:@selector(count)] || [runtimes count] == 0) {
-              createOutcome = [createOutcome stringByAppendingString:
-                  @"\n  (no runtime in the context -- cannot create a device)"];
-              return;
+        // B: what the context holds now
+        [log appendString:@"B. reading context collections (20s)...\n"];
+        flush();
+        __block NSString *outB = @"(did not finish)";
+        __block id ctxRuntime = nil;
+        __block id ctxType = nil;
+        BOOL okB = probeRunWithTimeout(20.0, ^{
+          @try {
+            id runtimes = idMsg2(liveContext, @selector(supportedRuntimes));
+            id types = idMsg2(liveContext, @selector(supportedDeviceTypes));
+            if ([runtimes respondsToSelector:@selector(count)] && [runtimes count] > 0) {
+              ctxRuntime = [runtimes firstObject];
             }
+            if ([types respondsToSelector:@selector(count)] && [types count] > 0) {
+              ctxType = [types firstObject];
+            }
+            outB = [NSString stringWithFormat:@"runtimes=%@\n   deviceTypes=%@",
+                                              runtimes, types];
+          } @catch (NSException *ex) {
+            outB = [NSString stringWithFormat:@"EXCEPTION: %@ -- %@", ex.name, ex.reason];
+          }
+        });
+        [log appendFormat:@"   %@ %@\n", okB ? @"returned" : @"*** TIMED OUT ***", outB];
+        flush();
 
-            id runtime = [runtimes firstObject];
-            id deviceType = [types firstObject];
-
-            // A device set is the container devices live in; point it at a
-            // writable directory of ours rather than the macOS default.
+        // C: open a device set in a writable directory of ours
+        [log appendString:@"C. deviceSetWithPath:error: (30s)...\n"];
+        flush();
+        __block NSString *outC = @"(did not finish)";
+        __block id deviceSet = nil;
+        BOOL okC = probeRunWithTimeout(30.0, ^{
+          @try {
             NSString *setPath = [docs stringByAppendingPathComponent:@"DeviceSet"];
             [[NSFileManager defaultManager] createDirectoryAtPath:setPath
                                      withIntermediateDirectories:YES
                                                       attributes:nil
                                                            error:nil];
             NSError *setErr = nil;
-            id deviceSet = ((id (*)(id, SEL, NSString *, NSError **))objc_msgSend)(
+            deviceSet = ((id (*)(id, SEL, NSString *, NSError **))objc_msgSend)(
                 liveContext, @selector(deviceSetWithPath:error:), setPath, &setErr);
-            createOutcome = [createOutcome stringByAppendingFormat:
-                @"\n  deviceSet: %@\n  setError: %@", deviceSet, setErr];
-            if (!deviceSet) return;
-
-            NSError *devErr = nil;
-            id device = ((id (*)(id, SEL, id, id, NSString *, NSError **))objc_msgSend)(
-                deviceSet, @selector(createDeviceWithType:runtime:name:error:),
-                deviceType, runtime, @"Probe iPhone 14", &devErr);
-            createOutcome = [createOutcome stringByAppendingFormat:
-                @"\n  createDevice: %@\n  error: %@", device, devErr];
-
-            if (device) {
-              createOutcome = [createOutcome stringByAppendingFormat:
-                  @"\n  *** SIMDEVICE CREATED ***\n  UDID=%@\n  name=%@\n  state=%@\n  devicePath=%@",
-                  idMsg(device, @selector(UDID)), idMsg(device, @selector(name)),
-                  idMsg(device, @selector(stateString)),
-                  idMsg(device, @selector(devicePath))];
-            }
+            outC = [NSString stringWithFormat:@"deviceSet=%@ error=%@", deviceSet, setErr];
           } @catch (NSException *ex) {
-            createOutcome = [NSString stringWithFormat:@"EXCEPTION: %@ -- %@",
-                                                       ex.name, ex.reason];
+            outC = [NSString stringWithFormat:@"EXCEPTION: %@ -- %@", ex.name, ex.reason];
           }
         });
-        [log appendFormat:@"  %@\n  %@\n",
-                           createOk ? @"returned" : @"*** TIMED OUT ***", createOutcome];
+        [log appendFormat:@"   %@ %@\n", okC ? @"returned" : @"*** TIMED OUT ***", outC];
+        flush();
+
+        // D: the actual creation
+        [log appendFormat:@"D. createDeviceWithType:runtime:name:error: (60s)...\n"
+                           @"   (type=%@ runtime=%@ set=%@)\n",
+                           ctxType ? @"yes" : @"nil", ctxRuntime ? @"yes" : @"nil",
+                           deviceSet ? @"yes" : @"nil"];
+        flush();
+        __block NSString *outD = @"(did not finish)";
+        if (deviceSet && ctxType && ctxRuntime) {
+          BOOL okD = probeRunWithTimeout(60.0, ^{
+            @try {
+              NSError *devErr = nil;
+              id device = ((id (*)(id, SEL, id, id, NSString *, NSError **))objc_msgSend)(
+                  deviceSet, @selector(createDeviceWithType:runtime:name:error:),
+                  ctxType, ctxRuntime, @"Probe iPhone 14", &devErr);
+              outD = [NSString stringWithFormat:@"device=%@\n   error=%@", device, devErr];
+              if (device) {
+                outD = [outD stringByAppendingFormat:
+                    @"\n   *** SIMDEVICE CREATED ***\n   UDID=%@\n   name=%@\n"
+                    @"   state=%@\n   devicePath=%@",
+                    idMsg2(device, @selector(UDID)), idMsg2(device, @selector(name)),
+                    idMsg2(device, @selector(stateString)),
+                    idMsg2(device, @selector(devicePath))];
+              }
+            } @catch (NSException *ex) {
+              outD = [NSString stringWithFormat:@"EXCEPTION: %@ -- %@", ex.name, ex.reason];
+            }
+          });
+          [log appendFormat:@"   %@ %@\n", okD ? @"returned" : @"*** TIMED OUT ***", outD];
+        } else {
+          [log appendString:@"   skipped -- a prerequisite above came back nil\n"];
+        }
         flush();
       }
     }
