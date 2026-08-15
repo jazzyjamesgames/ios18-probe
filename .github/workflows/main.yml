@@ -317,8 +317,12 @@ jobs:
           if [ -n "$IOS_DMG" ]; then
             MNT=/tmp/simrt
             mkdir -p "$MNT"
-            hdiutil attach "$IOS_DMG" -mountpoint "$MNT" -nobrowse -readonly 2>&1 \
+            # sudo because the images are root:wheel and CI steps run as
+            # `runner` -- the first attempt died with "attach failed -
+            # Permission denied", not a format or Cryptex problem.
+            sudo hdiutil attach "$IOS_DMG" -mountpoint "$MNT" -nobrowse -readonly 2>&1 \
               | tee profile-out/mount-log.txt || true
+            ls -la "$MNT" 2>&1 | head -10 | tee -a profile-out/mount-log.txt || true
 
             find "$MNT" -maxdepth 6 -name "*.simruntime" 2>/dev/null | head -5 \
               | tee profile-out/mounted-simruntime-paths.txt
@@ -339,7 +343,7 @@ jobs:
               echo "=== how big is the RuntimeRoot we are NOT shipping ==="
               du -sh "$RT" 2>/dev/null | tee profile-out/runtime-size.txt || true
             fi
-            hdiutil detach "$MNT" 2>&1 | tail -2 || true
+            sudo hdiutil detach "$MNT" 2>&1 | tail -2 || true
           fi
 
           ls -la profile-out/
