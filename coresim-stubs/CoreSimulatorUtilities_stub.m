@@ -308,7 +308,22 @@ NSString *xpc_dictionary_get_nsstring(xpc_object_t dict, const char *key) {
 }
 
 // --- family 5: guessed signatures, inert bodies ---
-const char *sim_host_arch(void) { return "arm64e"; }
+// Returns cpu_type_t, NOT a string. This was originally stubbed as
+// `const char *sim_host_arch(void) { return "arm64e"; }`, and that single
+// wrong return type is what made every registered runtime report
+// "The runtime is corrupt or missing required files."
+//
+// -[SimRuntime isAvailableWithError:] disassembles to:
+//     bl  _sim_host_arch
+//     mov w8, #0x7  ; movk w8, #0x100, lsl #16   -> 0x01000007 CPU_TYPE_X86_64
+//     cmp w0, w8
+//     mov w8, #0xc  ; movk w8, #0x100, lsl #16   -> 0x0100000C CPU_TYPE_ARM64
+//     cmp w0, w8
+//     b.ne <unavailable>
+// It compares the return value against cpu_type_t constants. A char* is a
+// pointer and matches neither, so the arch check failed and the generic
+// "corrupt or missing files" error came out -- nothing to do with files.
+int sim_host_arch(void) { return 12 | 0x01000000; }  // CPU_TYPE_ARM64
 
 CFStringRef currentHostVersion(void) { return CFSTR("1.0"); }
 
