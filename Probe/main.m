@@ -65,17 +65,31 @@ static NSString *gMissingSelectorsPath;
 
 static id probeMissingSelectorStub(id self, SEL _cmd) { return nil; }
 
+// Writes each discovery straight to the pasteboard as it happens. The last
+// failure terminated via std::terminate inside _dispatch_client_callout --
+// libdispatch is built without exception unwinding, so an ObjC exception
+// thrown inside a dispatch_sync barrier can't unwind back to our @try and
+// aborts the process instead. Nothing that runs at the end of launch (the
+// clipboard copy, the log write) gets a chance to run in that case, and the
+// Files app can't reach the on-disk log on this install -- so the only way
+// a discovery survives is to publish it the moment it's found.
+static void probeRecordMissing(NSString *description) {
+  if ([gMissingSelectors containsObject:description]) return;
+  [gMissingSelectors addObject:description];
+  NSString *joined = [gMissingSelectors componentsJoinedByString:@"\n"];
+  [joined writeToFile:gMissingSelectorsPath
+           atomically:YES
+             encoding:NSUTF8StringEncoding
+                error:nil];
+  [UIPasteboard generalPasteboard].string =
+      [NSString stringWithFormat:@"MISSING SELECTORS SO FAR:\n%@", joined];
+  NSLog(@"[PROBE] missing selector: %@", description);
+}
+
 static BOOL probeResolveInstanceMethod(id self, SEL _cmd, SEL sel) {
   NSString *name = NSStringFromSelector(sel);
-  if (![gMissingSelectors containsObject:name]) {
-    [gMissingSelectors addObject:name];
-    [[gMissingSelectors componentsJoinedByString:@"\n"]
-        writeToFile:gMissingSelectorsPath
-         atomically:YES
-           encoding:NSUTF8StringEncoding
-              error:nil];
-    NSLog(@"[PROBE] missing selector on %@: %@", NSStringFromClass((Class)self), name);
-  }
+  probeRecordMissing(
+      [NSString stringWithFormat:@"-[%@ %@]", NSStringFromClass((Class)self), name]);
   // Only stub CoreSimulator's own category methods. The previous run stubbed
   // EVERY unresolved selector, including Foundation internals that are
   // supposed to be dynamically resolved or to fail
@@ -86,6 +100,27 @@ static BOOL probeResolveInstanceMethod(id self, SEL _cmd, SEL sel) {
   // Log everything, but only interfere where we actually mean to.
   if ([name hasPrefix:@"sim_"]) {
     class_addMethod((Class)self, sel, (IMP)probeMissingSelectorStub, "@@:");
+    return YES;
+  }
+  return NO;
+}
+
+// Class methods resolve through a completely separate path
+// (+resolveClassMethod:, not +resolveInstanceMethod:), which is why the
+// instance-only hook above saw nothing before +[NSError ...] aborted the
+// process. Note the target of class_addMethod here is the METAclass --
+// that's where class methods live.
+static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
+  NSString *name = NSStringFromSelector(sel);
+  probeRecordMissing(
+      [NSString stringWithFormat:@"+[%@ %@]", NSStringFromClass((Class)self), name]);
+  // Stubbed for sim_-prefixed selectors as before, and also for anything on
+  // NSError: this crash is uncatchable, so without a stub the process dies
+  // at the first one and any selectors after it stay invisible. A nil return
+  // from an NSError factory is at least plausibly-shaped, and whatever
+  // breaks downstream of it is its own signal.
+  if ([name hasPrefix:@"sim_"] || [NSStringFromClass((Class)self) isEqualToString:@"NSError"]) {
+    class_addMethod(object_getClass((Class)self), sel, (IMP)probeMissingSelectorStub, "@@:");
     return YES;
   }
   return NO;
@@ -415,14 +450,24 @@ static BOOL probeResolveInstanceMethod(id self, SEL _cmd, SEL sel) {
     // the cluster's private subclasses by inheritance. class_addMethod only
     // fails if the class implements this *itself* (not inherited), which
     // these don't -- so no risk of clobbering NSObject's global version.
-    for (NSString *clsName in @[ @"__NSCFConstantString", @"NSString" ]) {
+    // Both hook kinds, across the Foundation classes CoreSimulator is most
+    // likely to have categories on. class_addMethod only fails if the class
+    // implements the resolver *itself* (not inherited), in which case we
+    // leave it alone rather than clobbering real dynamic-resolution logic.
+    for (NSString *clsName in @[
+           @"__NSCFConstantString", @"NSString", @"NSError", @"NSDictionary",
+           @"NSArray", @"NSURL", @"NSFileManager", @"NSBundle", @"NSData",
+           @"NSProcessInfo", @"NSNumber"
+         ]) {
       Class cls = NSClassFromString(clsName);
       if (!cls) continue;
-      BOOL added = class_addMethod(object_getClass(cls),
-                                    @selector(resolveInstanceMethod:),
-                                    (IMP)probeResolveInstanceMethod, "B@::");
-      [log appendFormat:@"selector-resolution hook on %@: %@\n", clsName,
-                         added ? @"installed" : @"NOT installed (already implemented)"];
+      Class meta = object_getClass(cls);
+      BOOL inst = class_addMethod(meta, @selector(resolveInstanceMethod:),
+                                   (IMP)probeResolveInstanceMethod, "B@::");
+      BOOL clsm = class_addMethod(meta, @selector(resolveClassMethod:),
+                                   (IMP)probeResolveClassMethod, "B@::");
+      [log appendFormat:@"hooks on %@: instance=%@ class=%@\n", clsName,
+                         inst ? @"yes" : @"no", clsm ? @"yes" : @"no"];
     }
     flush();
 
