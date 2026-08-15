@@ -1034,7 +1034,8 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
         // downloaded; the point is to find the minimum structure that
         // satisfies each check, which scopes what the real 16GB tree must
         // actually provide.
-        NSFileManager *fm = [NSFileManager defaultManager];
+        // (fm is already the NSFileManager declared in the device-type block
+        // above -- reuse it rather than redefining in the same scope)
         NSString *rtBuild = [docs stringByAppendingPathComponent:@"rt-build"];
         [fm removeItemAtPath:rtBuild error:nil];
         [fm createDirectoryAtPath:rtBuild withIntermediateDirectories:YES
