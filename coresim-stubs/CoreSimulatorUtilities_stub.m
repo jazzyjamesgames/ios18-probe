@@ -328,6 +328,32 @@
 }
 @end
 
+// A stack-pop on a mutable array. Unlike everything else here it carries no
+// sim_ prefix, which is why the sweep for sim_-prefixed selectors missed it
+// and boot died on -[__NSArrayM popLastObject] instead.
+//
+// loadAllBundlesWithError: uses it to drain a worklist:
+//
+//    x0 = popLastObject
+//    cbz x0 -> exit loop
+//    addObject: / portIdentifier ...
+//
+// so it returns the object and nil once the array is empty. The call site
+// follows the return with objc_retainAutoreleasedReturnValue, i.e. it expects
+// a normally-managed object back.
+@interface NSMutableArray (CoreSimulatorUtilities)
+- (id)popLastObject;
+@end
+
+@implementation NSMutableArray (CoreSimulatorUtilities)
+- (id)popLastObject {
+  id last = [self lastObject];
+  if (!last) return nil;
+  [self removeLastObject];
+  return last;
+}
+@end
+
 // Seen in the missing-selector list alongside the above. Same family as
 // sim_realPath: compare paths after resolving them, so symlinks and /private
 // prefixes don't produce false negatives.

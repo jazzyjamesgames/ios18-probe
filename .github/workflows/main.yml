@@ -244,6 +244,23 @@ jobs:
             lipo -thin arm64e "$CSU" -output csu_thin.bin 2>/dev/null || cp "$CSU" csu_thin.bin
             file csu_thin.bin
 
+            # Every category method it adds to Foundation classes, in one shot.
+            # These have been surfacing one per device round trip -- each one a
+            # build, an install and a crash -- and the sim_-prefix grep below
+            # cannot catch the ones without that prefix, which is exactly how
+            # -[__NSArrayM popLastObject] got through. __objc_catlist has the
+            # complete list because a category on a class from another image
+            # can't be merged away by the linker.
+            echo "=== ALL categories CoreSimulatorUtilities defines ==="
+            python3 tools/dump_objc_categories.py csu_thin.bin \
+              | tee profile-out/csu-categories.txt || echo "(dump failed)"
+
+            # Whether shipping the real one instead of our stub is even an
+            # option comes down to what it drags in.
+            echo "=== what the real CoreSimulatorUtilities links against ==="
+            otool -L csu_thin.bin 2>/dev/null \
+              | tee profile-out/csu-deps.txt || true
+
             echo "=== any sim_ symbols (categories are local syms, so -a) ==="
             nm -a csu_thin.bin 2>/dev/null | grep -i "sim_packedVersion\|sim_cpuType\|sim_realPath" \
               | tee profile-out/csu-sim-symbols.txt || echo "(none)"
