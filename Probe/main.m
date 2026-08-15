@@ -248,7 +248,13 @@ static BOOL probeLooksLikeCoreSimulator(NSString *name) {
 // all, which is what crashed the run right after the hooks went in.
 static void probeRecordMissing(NSString *description) {
   NSLock *lock = probeLock();
-  [lock lock];
+  // tryLock, never lock. These hooks are process-wide, so this runs on the
+  // MAIN thread too -- UIKit's own os_log paths hit unresolved selectors
+  // constantly. Blocking here stalled the main thread behind a lock another
+  // thread held, and iOS watchdog-killed the app with 0x8BADF00D ("failed to
+  // terminate gracefully after 5.0s"). Losing an occasional duplicate record
+  // is a fine trade for never stalling the UI thread.
+  if (![lock tryLock]) return;
   BOOL isNew = ![gMissingSelectors containsObject:description];
   if (isNew) [gMissingSelectors addObject:description];
   [lock unlock];
@@ -256,7 +262,10 @@ static void probeRecordMissing(NSString *description) {
   // the probe thread; touching it from arbitrary threads is exactly the race
   // being fixed. flush() runs often enough on the probe thread that findings
   // still reach the clipboard promptly.
-  if (isNew) NSLog(@"[PROBE] missing selector: %@", description);
+  // %s not %@: an object argument makes os_log flatten it, which probes for
+  // description selectors, which re-enters selector resolution -- the exact
+  // path in the watchdog backtrace.
+  if (isNew) NSLog(@"[PROBE] missing selector: %s", [description UTF8String]);
 }
 
 // Formats WITHOUT %@ on purpose. The previous version used
@@ -278,7 +287,15 @@ static NSString *probeDescribeSelector(char kind, Class cls, SEL sel) {
 // instead of recursing. Thread-local, since the hook runs on any thread.
 static __thread int gProbeInResolver = 0;
 
+// Master switch. The hooks can't be uninstalled (a method added to a class
+// stays added), but they can be made inert. Left on for the whole app
+// lifetime they keep intercepting every unresolved selector in the process
+// -- including UIKit's, on the main thread -- long after the CoreSimulator
+// work is done, which is pure risk for no information.
+static BOOL gHooksEnabled = YES;
+
 static BOOL probeResolveInstanceMethod(id self, SEL _cmd, SEL sel) {
+  if (!gHooksEnabled) return NO;
   if (gProbeInResolver) return NO;
   gProbeInResolver++;
 
@@ -299,6 +316,7 @@ static BOOL probeResolveInstanceMethod(id self, SEL _cmd, SEL sel) {
 // class methods live. Same %@-free formatting and re-entrancy guard as
 // above, for the same reason.
 static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
+  if (!gHooksEnabled) return NO;
   if (gProbeInResolver) return NO;
   gProbeInResolver++;
 
@@ -1431,6 +1449,13 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
       }
     }
   }
+
+  // Make the selector hooks inert now that the CoreSimulator work is done.
+  // Leaving them live means every unresolved selector in the process keeps
+  // routing through probe code -- on the main thread, during UIKit event
+  // handling -- for no further information. That's what the watchdog kill
+  // came out of.
+  gHooksEnabled = NO;
 
   [log appendString:@"\n=== PROBE COMPLETE ===\n"];
   [log appendFormat:@"(also written to %@, though the Files app can't see "
