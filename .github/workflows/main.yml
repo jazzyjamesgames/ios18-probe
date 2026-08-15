@@ -218,6 +218,41 @@ jobs:
             [ -n "$RPROF" ] && plutil -convert xml1 -o - "$RPROF" | tee profile-out/runtime-profile.plist
           fi
 
+          # Ground truth for the two category methods the device just
+          # revealed: -[NSString sim_packedVersion] and -[NSString sim_cpuType].
+          # Both are currently stubbed to nil, which is exactly why parsing a
+          # real profile silently yields no device types -- CoreSimulator asks
+          # "16.1" for its packed version and "arm64" for its cpu type and
+          # gets nothing back. Guessing the packing arithmetic risks producing
+          # values that compare wrongly, so read the real implementation.
+          CSU=/Library/Developer/PrivateFrameworks/CoreSimulator.framework/Versions/A/Frameworks/CoreSimulatorUtilities.framework/Versions/A/CoreSimulatorUtilities
+          echo "=== CoreSimulatorUtilities: $CSU ==="
+          ls -la "$CSU" 2>&1 || echo "(not found)"
+
+          if [ -f "$CSU" ]; then
+            lipo -thin arm64e "$CSU" -output csu_thin.bin 2>/dev/null || cp "$CSU" csu_thin.bin
+            file csu_thin.bin
+
+            echo "=== any sim_ symbols (categories are local syms, so -a) ==="
+            nm -a csu_thin.bin 2>/dev/null | grep -i "sim_packedVersion\|sim_cpuType\|sim_realPath" \
+              | tee profile-out/csu-sim-symbols.txt || echo "(none)"
+
+            otool -tV csu_thin.bin > csu-disasm.txt 2>/dev/null || true
+            wc -l csu-disasm.txt
+
+            for fn in sim_packedVersion sim_cpuType; do
+              echo "=== disassembly: $fn ==="
+              grep -n "$fn\]:" csu-disasm.txt | head -3
+              LINE=$(grep -n "$fn\]:" csu-disasm.txt | head -1 | cut -d: -f1)
+              if [ -n "$LINE" ]; then
+                sed -n "${LINE},$((LINE+90))p" csu-disasm.txt \
+                  | tee "profile-out/disasm-$fn.txt"
+              else
+                echo "(symbol not found in disassembly)" | tee "profile-out/disasm-$fn.txt"
+              fi
+            done
+          fi
+
           ls -la profile-out/
 
       - uses: actions/upload-artifact@v4
