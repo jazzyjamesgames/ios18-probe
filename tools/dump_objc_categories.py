@@ -61,11 +61,20 @@ class Image:
             return
         _ver, _starts, imports_off, symbols_off, imports_count, imports_fmt = \
             struct.unpack_from("<IIIIII", self.data, cf)
-        if imports_fmt != 1:      # only DYLD_CHAINED_IMPORT is handled
+        # Three import encodings differ only in where the name offset sits.
+        # arm64e binaries (the real CoreSimulatorUtilities) do not use format 1,
+        # which is why an earlier version of this resolved every class to "?".
+        widths = {1: 4, 2: 8, 3: 16}
+        if imports_fmt not in widths:
             return
         for i in range(imports_count):
-            raw = struct.unpack_from("<I", self.data, cf + imports_off + i * 4)[0]
-            name_off = raw >> 9
+            base = cf + imports_off + i * widths[imports_fmt]
+            if imports_fmt == 1:
+                name_off = struct.unpack_from("<I", self.data, base)[0] >> 9
+            elif imports_fmt == 2:
+                name_off = (struct.unpack_from("<Q", self.data, base)[0] >> 9) & 0x7FFFFF
+            else:
+                name_off = struct.unpack_from("<Q", self.data, base)[0] >> 32
             start = cf + symbols_off + name_off
             end = self.data.index(b"\0", start)
             self.imports.append(self.data[start:end].decode(errors="replace"))
@@ -76,11 +85,23 @@ class Image:
         if not raw:
             return None
         val = struct.unpack("<Q", raw)[0]
-        if not (val >> 63) & 1:      # not a bind
-            return None
-        ordinal = val & 0xFFFFFF
-        if ordinal < len(self.imports):
-            return self.imports[ordinal]
+        # Two pointer formats in play. DYLD_CHAINED_PTR_64 (plain arm64) flags a
+        # bind in bit 63 with a 24-bit ordinal; DYLD_CHAINED_PTR_ARM64E uses bit
+        # 63 for auth and bit 62 for bind, with a 16-bit ordinal. Try whichever
+        # applies and keep the reading that names an actual class.
+        candidates = []
+        if (val >> 63) & 1:
+            candidates.append(val & 0xFFFFFF)
+        if (val >> 62) & 1:
+            candidates.append(val & 0xFFFF)
+        for ordinal in candidates:
+            if ordinal < len(self.imports):
+                name = self.imports[ordinal]
+                if "_OBJC_CLASS_$_" in name:
+                    return name
+        for ordinal in candidates:
+            if ordinal < len(self.imports):
+                return self.imports[ordinal]
         return None
 
     def _parse(self):

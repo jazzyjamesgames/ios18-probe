@@ -251,6 +251,13 @@ jobs:
             # -[__NSArrayM popLastObject] got through. __objc_catlist has the
             # complete list because a category on a class from another image
             # can't be merged away by the linker.
+            # Keep the thinned binary so the metadata parsing can be iterated
+            # on locally instead of one CI round trip per fix. arm64e uses a
+            # different chained-pointer encoding than the arm64 stub the tool
+            # was first validated against, and that difference is invisible
+            # until it's run against this exact file.
+            cp csu_thin.bin profile-out/CoreSimulatorUtilities-thin.bin
+
             echo "=== ALL categories CoreSimulatorUtilities defines ==="
             python3 tools/dump_objc_categories.py csu_thin.bin \
               | tee profile-out/csu-categories.txt || echo "(dump failed)"
