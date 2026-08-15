@@ -667,12 +667,16 @@ jobs:
         run: |
           zip -r Probe-unsigned.ipa Payload
           # also keep the loose .app around for inspection
-          cp -R Payload/Probe.app ./Probe.app
+          # Deliberately NOT copying Probe.app out for upload any more. Now
+          # that SampleContent ships, the tree contains a file with a colon in
+          # its name (RebuildThumbnails_20180706-231725-07:00), and GitHub
+          # artifacts reject colons outright -- which failed the upload and
+          # cost a build. The .ipa is a zip, so it carries that name fine;
+          # only the loose directory upload was the problem.
 
       - uses: actions/upload-artifact@v4
         with:
           name: probe-build
           path: |
             Probe-unsigned.ipa
-            Probe.app
           retention-days: 14
