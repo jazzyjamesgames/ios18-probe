@@ -98,6 +98,36 @@
 }
 @end
 
+// Third real category, and the most interesting one yet: it was reached only
+// via serviceContextForDeveloperDir:connectionType:error: with connectionType
+// 1, 2 or 3. Types 0 and standaloneConnectionWithError: both die on the
+// daemon version handshake (SimError 61), but 1-3 get PAST that and ask for
+// simulator preferences instead -- the first evidence of a code path not
+// gated on the missing CoreSimulatorService.
+//
+// Real implementation: a defaults object scoped to CoreSimulator's own
+// preference domain, which is what the name says and what the caller will
+// read settings from. Falls back to standardUserDefaults if the suite can't
+// be created, since returning nil here would just move the failure.
+@interface NSUserDefaults (CoreSimulatorUtilities)
++ (NSUserDefaults *)simulatorDefaults;
+@end
+
+@implementation NSUserDefaults (CoreSimulatorUtilities)
++ (NSUserDefaults *)simulatorDefaults {
+  static NSUserDefaults *simulatorDefaults;
+  static dispatch_once_t onceToken;
+  dispatch_once(&onceToken, ^{
+    simulatorDefaults =
+        [[NSUserDefaults alloc] initWithSuiteName:@"com.apple.CoreSimulator"];
+    if (!simulatorDefaults) {
+      simulatorDefaults = [NSUserDefaults standardUserDefaults];
+    }
+  });
+  return simulatorDefaults;
+}
+@end
+
 // NOTE: there is deliberately no +bundleForClass here. It was implemented
 // once, as +[NSObject bundleForClass] returning +[NSBundle bundleForClass:],
 // on the theory that it was a third CoreSimulator category. That was wrong

@@ -109,7 +109,12 @@ static void probePublish(void) {
 // sim_realPath and errorWithSimErrno:localizedDescription: -- and matches
 // none of the Foundation hooks seen in any run.
 static BOOL probeLooksLikeCoreSimulator(NSString *name) {
-  return [name hasPrefix:@"sim_"] || [name containsString:@"Sim"];
+  // "simulator" lowercase is here because the capitalized-"Sim" test alone
+  // missed +[NSUserDefaults simulatorDefaults]. Still specific enough to
+  // match no Foundation hook seen in any run -- deliberately narrower than
+  // a case-insensitive "sim", which would catch ordinary words.
+  return [name hasPrefix:@"sim_"] || [name containsString:@"Sim"] ||
+         [name containsString:@"simulator"];
 }
 
 static void probeRecordMissing(NSString *description) {
@@ -500,7 +505,8 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
     for (NSString *clsName in @[
            @"__NSCFConstantString", @"NSString", @"NSError", @"NSDictionary",
            @"NSArray", @"NSURL", @"NSFileManager", @"NSBundle", @"NSData",
-           @"NSProcessInfo", @"NSNumber"
+           @"NSProcessInfo", @"NSNumber", @"NSUserDefaults", @"NSDate",
+           @"NSUUID", @"NSSet"
          ]) {
       Class cls = NSClassFromString(clsName);
       if (!cls) continue;
