@@ -384,7 +384,21 @@ jobs:
           # all -- those live in Info.plist).
           mkdir -p staged-profiles/DeviceTypes
 
-          DT=$(find /Applications/Xcode_16.1.app -maxdepth 12 -name "iPhone*.simdevicetype" 2>/dev/null | head -1)
+          # Prefer a modern @3x iPhone over whatever sorts first. The previous
+          # run staged an iPhone Xʀ purely because it was head -1 -- that's a
+          # 828x1792 @2x/326ppi panel, nothing like the iPhone 14 (1170x2532
+          # @3x/460ppi) this is actually being tested on. Doesn't change
+          # whether registration works, but there's no reason to simulate an
+          # older device by accident.
+          for want in "iPhone 16 Pro.simdevicetype" "iPhone 16.simdevicetype" \
+                      "iPhone 15 Pro.simdevicetype" "iPhone 15.simdevicetype" \
+                      "iPhone 14 Pro.simdevicetype" "iPhone 14.simdevicetype"; do
+            DT=$(find /Applications/Xcode_16.1.app -maxdepth 12 -name "$want" 2>/dev/null | head -1)
+            [ -n "$DT" ] && break
+          done
+          if [ -z "$DT" ]; then
+            DT=$(find /Applications/Xcode_16.1.app -maxdepth 12 -name "iPhone*.simdevicetype" 2>/dev/null | head -1)
+          fi
           if [ -z "$DT" ]; then
             DT=$(find /Applications/Xcode_16.1.app -maxdepth 12 -name "*.simdevicetype" 2>/dev/null | head -1)
           fi

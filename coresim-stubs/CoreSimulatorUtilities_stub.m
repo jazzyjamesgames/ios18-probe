@@ -98,6 +98,52 @@
 }
 @end
 
+// These two are transcribed from the REAL implementations, disassembled out
+// of Apple's CoreSimulatorUtilities on the CI runner -- not inferred. They
+// matter more than they look: both were being stubbed to nil by the probe's
+// sim_ heuristic, so when CoreSimulator parsed a genuine Apple
+// .simdevicetype it asked "16.1" for its packed version and "arm64" for its
+// cpu type, got nothing back, and silently registered no device types at
+// all. Guessing the arithmetic wasn't safe because these values get compared
+// against each other and against compiled-in constants.
+//
+// -[NSString(SIMPackedVersion) sim_packedVersion], verbatim from the
+// disassembly: split on ".", then
+//   (major << 16) | ((minor & 0xFF) << 8) | (patch & 0xFF)
+// with missing components treated as 0. So "16.1" -> 0x100100.
+@interface NSString (SIMPackedVersion)
+- (unsigned int)sim_packedVersion;
+@end
+
+@implementation NSString (SIMPackedVersion)
+- (unsigned int)sim_packedVersion {
+  NSArray<NSString *> *components = [self componentsSeparatedByString:@"."];
+  unsigned int major = components.count >= 1 ? (unsigned int)[components[0] intValue] : 0;
+  unsigned int minor = components.count >= 2 ? (unsigned int)[components[1] intValue] : 0;
+  unsigned int patch = components.count >= 3 ? (unsigned int)[components[2] intValue] : 0;
+  return (major << 16) | ((minor & 0xFF) << 8) | (patch & 0xFF);
+}
+@end
+
+// -[NSString(SIMCPUType) sim_cpuType]: a string compare chain returning the
+// standard mach/machine.h constants. The disassembly computes the arm64 case
+// as x86_64's value plus 5 (7 -> 12), which is just CPU_TYPE_X86_64 ->
+// CPU_TYPE_ARM64 with the ABI64 bit already set.
+@interface NSString (SIMCPUType)
+- (int)sim_cpuType;
+@end
+
+@implementation NSString (SIMCPUType)
+- (int)sim_cpuType {
+  if ([self isEqualToString:@"i386"]) return 7;                 // CPU_TYPE_X86
+  if ([self isEqualToString:@"x86_64"]) return 7 | 0x01000000;  // CPU_TYPE_X86_64
+  if ([self isEqualToString:@"arm64"] || [self isEqualToString:@"arm64e"]) {
+    return 12 | 0x01000000;                                     // CPU_TYPE_ARM64
+  }
+  return 0;
+}
+@end
+
 // Third real category, and the most interesting one yet: it was reached only
 // via serviceContextForDeveloperDir:connectionType:error: with connectionType
 // 1, 2 or 3. Types 0 and standaloneConnectionWithError: both die on the
