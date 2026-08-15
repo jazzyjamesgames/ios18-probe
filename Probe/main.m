@@ -429,27 +429,53 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
     didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
   self.window = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
   UIViewController *vc = [[UIViewController alloc] init];
-  vc.view.backgroundColor = [UIColor whiteColor];
+  // systemBackgroundColor, not white: hardcoded white produced a bright band
+  // behind the controls while the log rendered dark-mode.
+  vc.view.backgroundColor = [UIColor systemBackgroundColor];
 
+  // Compact layout. The controls had grown to 60pt-tall buttons stacked with
+  // wide gaps, and the fetch button actually overlapped the bottom of the log
+  // view -- the log is the thing worth reading, so the chrome shrinks and it
+  // gets the space. Measured up from the bottom so nothing overlaps:
+  //   log ... | label 12 | bar 3 | fetch 32 | copy 32 | 8pt inset
+  // Safe areas are hardcoded because this runs before the window is laid out,
+  // so vc.view.safeAreaInsets is still zero here. 50/34 covers the status bar
+  // and home indicator on this hardware -- the screenshot showed controls
+  // sitting under the indicator and the log running up under the clock.
   CGRect bounds = vc.view.bounds;
-  CGRect textFrame = CGRectMake(0, 0, bounds.size.width, bounds.size.height - 90);
-  UITextView *tv = [[UITextView alloc] initWithFrame:textFrame];
+  const CGFloat topInset = 50, bottomInset = 34;
+  const CGFloat pad = 8, btnH = 30, labelH = 12, barH = 3;
+  const CGFloat copyY = bounds.size.height - bottomInset - btnH;
+  const CGFloat fetchY = copyY - 4 - btnH;
+  const CGFloat barY = fetchY - 6 - barH;
+  const CGFloat labelY = barY - 2 - labelH;
+  const CGFloat chromeTop = labelY - 4;
+
+  UITextView *tv =
+      [[UITextView alloc] initWithFrame:CGRectMake(0, topInset, bounds.size.width,
+                                                   chromeTop - topInset)];
   tv.autoresizingMask =
       UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
   tv.editable = NO;
-  tv.font = [UIFont monospacedSystemFontOfSize:13 weight:UIFontWeightRegular];
+  // Smaller than before: these logs run to hundreds of lines and fitting more
+  // on screen beats legibility at arm's length.
+  tv.font = [UIFont monospacedSystemFontOfSize:9 weight:UIFontWeightRegular];
+  // Match the view instead of defaulting to white: the screenshot showed a
+  // white band where the text view didn't reach, against dark log text.
+  tv.backgroundColor = [UIColor systemBackgroundColor];
+  tv.textColor = [UIColor labelColor];
+  tv.textContainerInset = UIEdgeInsetsMake(4, 4, 4, 4);
   [vc.view addSubview:tv];
 
   UIButton *copyButton = [UIButton buttonWithType:UIButtonTypeSystem];
-  copyButton.frame =
-      CGRectMake(20, bounds.size.height - 80, bounds.size.width - 40, 60);
+  copyButton.frame = CGRectMake(pad, copyY, bounds.size.width - 2 * pad, btnH);
   copyButton.autoresizingMask =
       UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleTopMargin;
   copyButton.backgroundColor = [UIColor systemBlueColor];
   copyButton.tintColor = [UIColor whiteColor];
-  copyButton.titleLabel.font = [UIFont boldSystemFontOfSize:20];
-  copyButton.layer.cornerRadius = 12;
-  [copyButton setTitle:@"COPY LOG TO CLIPBOARD" forState:UIControlStateNormal];
+  copyButton.titleLabel.font = [UIFont boldSystemFontOfSize:13];
+  copyButton.layer.cornerRadius = 6;
+  [copyButton setTitle:@"COPY LOG" forState:UIControlStateNormal];
   [copyButton addTarget:self
                  action:@selector(copyLogTapped:)
        forControlEvents:UIControlEventTouchUpInside];
@@ -459,15 +485,14 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
   // compressed and ~16GB extracted; nothing that large should start on its
   // own just because the app launched.
   UIButton *fetchButton = [UIButton buttonWithType:UIButtonTypeSystem];
-  fetchButton.frame = CGRectMake(20, bounds.size.height - 150,
-                                 bounds.size.width - 40, 60);
+  fetchButton.frame = CGRectMake(pad, fetchY, bounds.size.width - 2 * pad, btnH);
   fetchButton.autoresizingMask =
       UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleTopMargin;
   fetchButton.backgroundColor = [UIColor systemGreenColor];
   fetchButton.tintColor = [UIColor whiteColor];
-  fetchButton.titleLabel.font = [UIFont boldSystemFontOfSize:18];
-  fetchButton.layer.cornerRadius = 12;
-  [fetchButton setTitle:@"DOWNLOAD REAL RUNTIME" forState:UIControlStateNormal];
+  fetchButton.titleLabel.font = [UIFont boldSystemFontOfSize:13];
+  fetchButton.layer.cornerRadius = 6;
+  [fetchButton setTitle:@"DOWNLOAD RUNTIME" forState:UIControlStateNormal];
   [fetchButton addTarget:self
                   action:@selector(fetchRuntimeTapped:)
         forControlEvents:UIControlEventTouchUpInside];
@@ -479,7 +504,7 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
   // showing.
   UIProgressView *bar =
       [[UIProgressView alloc] initWithProgressViewStyle:UIProgressViewStyleDefault];
-  bar.frame = CGRectMake(20, bounds.size.height - 178, bounds.size.width - 40, 4);
+  bar.frame = CGRectMake(pad, barY, bounds.size.width - 2 * pad, barH);
   bar.autoresizingMask =
       UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleTopMargin;
   bar.progress = 0;
@@ -487,11 +512,11 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
   self.progressBar = bar;
 
   UILabel *progressLabel =
-      [[UILabel alloc] initWithFrame:CGRectMake(20, bounds.size.height - 200,
-                                                bounds.size.width - 40, 18)];
+      [[UILabel alloc] initWithFrame:CGRectMake(pad, labelY,
+                                                bounds.size.width - 2 * pad, labelH)];
   progressLabel.autoresizingMask =
       UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleTopMargin;
-  progressLabel.font = [UIFont monospacedDigitSystemFontOfSize:12
+  progressLabel.font = [UIFont monospacedDigitSystemFontOfSize:9
                                                         weight:UIFontWeightRegular];
   progressLabel.textColor = [UIColor secondaryLabelColor];
   progressLabel.text = @"idle";
