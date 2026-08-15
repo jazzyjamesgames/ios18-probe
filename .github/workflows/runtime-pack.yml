@@ -22,6 +22,12 @@ on:
       dry_run:
         description: "Only measure sizes; do not upload"
         default: "true"
+      subset:
+        description: >
+          Path under RuntimeRoot to pack instead of the whole tree, e.g.
+          usr/lib/system. Lets the whole download+extract path be proven on
+          ~50MB before committing to a multi-GB transfer. Empty = full tree.
+        default: "usr/lib/system"
 
 permissions:
   contents: write
@@ -65,10 +71,22 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${{ github.event.inputs.tag }}" \
+          TAG="${{ github.event.inputs.tag }}"
+          gh release create "$TAG" \
             --title "Simulator RuntimeRoot (chunked)" \
             --notes "tar.gz of a real simulator RuntimeRoot, split into <2GB chunks for on-device download." \
             || echo "(release already exists, reusing)"
+
+          # Delete every existing asset first. A re-run with a different
+          # subset (or better compression) can produce FEWER chunks, and
+          # leftovers from a previous run would still be listed -- the device
+          # walks chunk .000, .001, ... until one 404s, so a stale .003 would
+          # silently corrupt the stream. Clearing first makes each run's
+          # asset set authoritative.
+          for asset in $(gh release view "$TAG" --json assets -q '.assets[].name' 2>/dev/null); do
+            echo "deleting stale asset: $asset"
+            gh release delete-asset "$TAG" "$asset" --yes || true
+          done
 
       - name: Pack and upload chunks
         if: ${{ github.event.inputs.dry_run != 'true' }}
@@ -76,9 +94,22 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           cd "$RT/Contents/Resources"
-          # Stream straight from the mounted volume: never materialises the
-          # 16GB tree or the whole archive on the runner's disk.
-          tar czf - RuntimeRoot \
+          SUBSET="${{ github.event.inputs.subset }}"
+          if [ -n "$SUBSET" ]; then
+            TARGET="RuntimeRoot/$SUBSET"
+            echo "packing SUBSET: $TARGET"
+            du -sh "$TARGET" || true
+          else
+            TARGET="RuntimeRoot"
+            echo "packing FULL tree"
+          fi
+
+          # Paths are stored relative to Contents/Resources, so extraction on
+          # device recreates RuntimeRoot/... in place regardless of subset.
+          #
+          # Streams straight from the read-only mount: never materialises the
+          # 16GB tree or the full archive on the runner's disk.
+          tar czf - "$TARGET" \
             | python3 "$GITHUB_WORKSPACE/tools/pack_stream_upload.py" \
                 "${{ github.event.inputs.tag }}" runtimeroot.tar.gz
 
