@@ -275,6 +275,139 @@ static void probeWriteExceptionCrumb(NSException *ex) {
         ex.reason ? [ex.reason UTF8String] : "?");
 }
 
+// --- boot tracing -----------------------------------------------------------
+//
+// Boot now dies inside -[SimDevice _onBootstrapQueue_bootWithOptions:...] with
+//
+//   -createLaunchdJobWithBinpref:extraEnvironment:disabledJobs:error: failed,
+//    but it did not return an error.
+//
+// which is the worst kind of failure: CoreSimulator itself doesn't know why.
+// Reading the disassembly narrowed it to an early `cbz w0` on the result of
+// -createOverlayLaunchdPlistsWithError:, but every NO-returning path in that
+// call chain looked like it sets an error, so the static read doesn't settle
+// it. These wrappers report what actually happened.
+//
+// The exception unwinds through libdispatch's dispatch_sync frames, which have
+// no unwind information, so it aborts via _objc_terminate instead of
+// propagating -- @catch around bootWithOptions: can never see it (confirmed by
+// the crash report). That's also why this writes to disk on every line and
+// flushes: whatever reaches the file before the abort is what we get to read
+// on the next launch.
+static NSString *gBootTracePath;
+
+static void probeBootLog(NSString *line) {
+  if (!gBootTracePath) return;
+  FILE *f = fopen(gBootTracePath.fileSystemRepresentation, "a");
+  if (!f) return;
+  fprintf(f, "%s\n", line.UTF8String ?: "?");
+  fflush(f);
+  fclose(f);
+}
+
+static IMP gOrigCreateJob, gOrigOverlay, gOrigOverlayDir, gOrigPlatformRes;
+static IMP gOrigPortsToRegister, gOrigLaunchdJobName;
+
+static id probeCreateJob(id self, SEL _cmd, id binpref, id env, id disabled,
+                         NSError **error) {
+  probeBootLog([NSString stringWithFormat:
+      @"-> createLaunchdJobWithBinpref:%@ extraEnvironment:%@ disabledJobs:%@",
+      binpref, env ? @"(dict)" : @"(nil)", disabled ? @"(obj)" : @"(nil)"]);
+  NSError *local = nil;
+  id result = ((id (*)(id, SEL, id, id, id, NSError **))gOrigCreateJob)(
+      self, _cmd, binpref, env, disabled, &local);
+  probeBootLog([NSString stringWithFormat:
+      @"<- createLaunchdJobWithBinpref: result=%@ error=%@",
+      result ? @"(job dict)" : @"NIL", local ?: @"(none)"]);
+  if (error && local) *error = local;
+  return result;
+}
+
+static BOOL probeOverlay(id self, SEL _cmd, NSError **error) {
+  NSError *local = nil;
+  BOOL ok = ((BOOL (*)(id, SEL, NSError **))gOrigOverlay)(self, _cmd, &local);
+  probeBootLog([NSString stringWithFormat:
+      @"   createOverlayLaunchdPlistsWithError: -> %d error=%@",
+      ok, local ?: @"(none)"]);
+  if (error && local) *error = local;
+  return ok;
+}
+
+static BOOL probeOverlayDir(id self, SEL _cmd, NSString *dir, NSString *root,
+                            NSError **error) {
+  NSError *local = nil;
+  BOOL ok = ((BOOL (*)(id, SEL, id, id, NSError **))gOrigOverlayDir)(
+      self, _cmd, dir, root, &local);
+  probeBootLog([NSString stringWithFormat:
+      @"   createOverlayLaunchdPlistsFromFilesInDirectory:%@\n"
+       "                                    executableRoot:%@\n"
+       "     -> %d error=%@",
+      dir ?: @"(nil)", root ?: @"(nil)", ok, local ?: @"(none)"]);
+  if (error && local) *error = local;
+  return ok;
+}
+
+static id probePlatformRes(id self, SEL _cmd) {
+  id result = ((id (*)(id, SEL))gOrigPlatformRes)(self, _cmd);
+  probeBootLog([NSString stringWithFormat:
+      @"   platformResourcesPath -> %@", result ?: @"(nil)"]);
+  return result;
+}
+
+static id probePortsToRegister(id self, SEL _cmd) {
+  id result = ((id (*)(id, SEL))gOrigPortsToRegister)(self, _cmd);
+  probeBootLog([NSString stringWithFormat:
+      @"   portsToRegisterWithLaunchd -> %@", result ?: @"(nil)"]);
+  return result;
+}
+
+static id probeLaunchdJobName(id self, SEL _cmd) {
+  id result = ((id (*)(id, SEL))gOrigLaunchdJobName)(self, _cmd);
+  probeBootLog([NSString stringWithFormat:
+      @"   launchdJobName -> %@", result ?: @"(nil)"]);
+  return result;
+}
+
+// Swap in the wrappers above. Each returns the original's value untouched and
+// forwards any error it produced, so this observes the boot without altering
+// it.
+static NSString *probeInstallBootTracing(void) {
+  struct { const char *cls; const char *sel; IMP replacement; IMP *original; }
+  hooks[] = {
+    { "SimDevice", "createLaunchdJobWithBinpref:extraEnvironment:disabledJobs:error:",
+      (IMP)probeCreateJob, &gOrigCreateJob },
+    { "SimDevice", "createOverlayLaunchdPlistsWithError:",
+      (IMP)probeOverlay, &gOrigOverlay },
+    { "SimDevice", "createOverlayLaunchdPlistsFromFilesInDirectory:executableRoot:error:",
+      (IMP)probeOverlayDir, &gOrigOverlayDir },
+    { "SimRuntime", "platformResourcesPath",
+      (IMP)probePlatformRes, &gOrigPlatformRes },
+    { "SimDevice", "portsToRegisterWithLaunchd",
+      (IMP)probePortsToRegister, &gOrigPortsToRegister },
+    { "SimDevice", "launchdJobName",
+      (IMP)probeLaunchdJobName, &gOrigLaunchdJobName },
+  };
+  NSMutableArray *installed = [NSMutableArray array];
+  NSMutableArray *missing = [NSMutableArray array];
+  for (size_t i = 0; i < sizeof(hooks) / sizeof(hooks[0]); i++) {
+    Class cls = objc_getClass(hooks[i].cls);
+    SEL sel = sel_registerName(hooks[i].sel);
+    Method m = cls ? class_getInstanceMethod(cls, sel) : NULL;
+    if (!m) {
+      [missing addObject:[NSString stringWithUTF8String:hooks[i].sel]];
+      continue;
+    }
+    *(hooks[i].original) = method_setImplementation(m, hooks[i].replacement);
+    [installed addObject:[NSString stringWithUTF8String:hooks[i].sel]];
+  }
+  return [NSString stringWithFormat:@"boot tracing on %lu method(s)%@",
+                                    (unsigned long)installed.count,
+                                    missing.count
+                                        ? [@"; NOT FOUND: " stringByAppendingString:
+                                              [missing componentsJoinedByString:@", "]]
+                                        : @""];
+}
+
 // libobjc's hook, not Foundation's. The assertion is thrown on
 // CoreSimulator's dispatch queue and dies via
 //   objc_exception_throw -> __cxa_throw -> std::__terminate -> _objc_terminate
@@ -573,6 +706,7 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
   // any point without running anything at the end of launch.
   gTextView = tv;
   gExceptionCrumbPath = [docs stringByAppendingPathComponent:@"last-exception.txt"];
+  gBootTracePath = [docs stringByAppendingPathComponent:@"boot-trace.txt"];
   // BOTH hooks: Foundation's for anything on the main run loop, and libobjc's
   // for the dispatch-queue terminations that killed device creation. Only the
   // latter fires for those, which is why nothing was captured before.
@@ -606,6 +740,19 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
   } else {
     [log appendString:@"(no exception recorded from a previous run)\n\n"];
   }
+
+  // The boot trace is written line by line and flushed, so it survives the
+  // abort that the exception crumb only records the end of. Read it out
+  // alongside, then clear it so this run's trace starts empty.
+  NSString *bootTrace = [NSString stringWithContentsOfFile:gBootTracePath
+                                                 encoding:NSUTF8StringEncoding
+                                                    error:nil];
+  if (bootTrace.length) {
+    [log appendString:@"=== BOOT TRACE FROM THE PREVIOUS RUN ===\n"];
+    [log appendString:bootTrace];
+    [log appendString:@"=== end of previous-run boot trace ===\n\n"];
+  }
+  [[NSFileManager defaultManager] removeItemAtPath:gBootTracePath error:nil];
   flush();
 
   NSString *bundlePath = [[NSBundle mainBundle] pathForResource:@"target"
@@ -1818,6 +1965,8 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
                                containerDir, chdirRc, cwdBuf,
                                [[NSFileManager defaultManager]
                                    fileExistsAtPath:tmpDir]];
+
+            [log appendFormat:@"\n%@\n", probeInstallBootTracing()];
 
             [log appendFormat:@"\nE. bootWithOptions:error: (90s) -- %@\n",
                                usingDownloaded ? @"REAL RuntimeRoot"
