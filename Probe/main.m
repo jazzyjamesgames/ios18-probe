@@ -595,6 +595,73 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
                              ? [gMissingSelectors componentsJoinedByString:@"\n"]
                              : @"(none)"];
       flush();
+
+      // sharedServiceContextForDeveloperDir:error: hardcodes the daemon path,
+      // and failed exactly there: SimError 61, service version (null) vs its
+      // own 993.7, because no CoreSimulatorService exists on iOS to answer
+      // the handshake.
+      //
+      // But the introspection dump shows that isn't the only path -- there's
+      // a connectionType parameter and a separate standalone entry point:
+      //   + serviceContextForDeveloperDir:connectionType:error:
+      //   + standaloneConnectionWithError:
+      //   + currentProcessIsServer          (already returns 0 for us)
+      // If any connection type runs the service IN-PROCESS, the missing
+      // daemon stops mattering, which would be a route around the wall
+      // rather than an attempt to fake what's behind it.
+      //
+      // Which integer means what isn't publicly documented, so rather than
+      // guess one, try them all and let the device say. Each attempt is
+      // logged and flushed BEFORE it runs: an abort inside a dispatch
+      // barrier can't be caught, so if one of these kills the process, the
+      // last line on the clipboard identifies exactly which.
+      [log appendString:@"\n=== Trying non-daemon connection paths ===\n"];
+      flush();
+
+      typedef id (*ConnTypeMsg)(Class, SEL, NSString *, NSUInteger, NSError **);
+      ConnTypeMsg connMsg = (ConnTypeMsg)objc_msgSend;
+      for (NSUInteger connectionType = 0; connectionType <= 3; connectionType++) {
+        [log appendFormat:@"\nserviceContextForDeveloperDir:connectionType:%lu:error: ...\n",
+                           (unsigned long)connectionType];
+        flush();
+        @try {
+          NSError *connError = nil;
+          id ctx = connMsg(serviceContextClass,
+                           @selector(serviceContextForDeveloperDir:connectionType:error:),
+                           developerDir, connectionType, &connError);
+          [log appendFormat:@"  result: %@\n  error: %@\n", ctx, connError];
+          if (ctx) {
+            // A live context means the daemon was bypassed. Ask it something
+            // that requires real internal state, not just a non-nil pointer.
+            typedef id (*IdMsg)(id, SEL);
+            IdMsg idMsg = (IdMsg)objc_msgSend;
+            [log appendFormat:@"  CONTEXT OBTAINED. developerDir=%@\n",
+                               idMsg(ctx, @selector(developerDir))];
+            [log appendFormat:@"  supportedRuntimes=%@\n",
+                               idMsg(ctx, @selector(supportedRuntimes))];
+            [log appendFormat:@"  supportedDeviceTypes=%@\n",
+                               idMsg(ctx, @selector(supportedDeviceTypes))];
+          }
+        } @catch (NSException *ex) {
+          [log appendFormat:@"  EXCEPTION: %@ -- %@\n", ex.name, ex.reason];
+        }
+        flush();
+      }
+
+      [log appendString:@"\n+[SimServiceContext standaloneConnectionWithError:] ...\n"];
+      flush();
+      @try {
+        typedef id (*StandaloneMsg)(Class, SEL, NSError **);
+        StandaloneMsg standaloneMsg = (StandaloneMsg)objc_msgSend;
+        NSError *standaloneError = nil;
+        id standalone = standaloneMsg(serviceContextClass,
+                                       @selector(standaloneConnectionWithError:),
+                                       &standaloneError);
+        [log appendFormat:@"  result: %@\n  error: %@\n", standalone, standaloneError];
+      } @catch (NSException *ex) {
+        [log appendFormat:@"  EXCEPTION: %@ -- %@\n", ex.name, ex.reason];
+      }
+      flush();
     }
   }
 
