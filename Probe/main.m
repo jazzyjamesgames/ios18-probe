@@ -65,6 +65,21 @@ static NSString *gMissingSelectorsPath;
 
 static id probeMissingSelectorStub(id self, SEL _cmd) { return nil; }
 
+// For unknown +[NSError errorWith...] factories specifically. Returning nil
+// from an error constructor tends to turn a diagnosable failure into a crash
+// downstream, and an unrecognized one aborts the run outright -- which is how
+// a single missing errorWithPOSIXError:failureReason: ended an entire
+// progressive-construction pass. A real (if generic) NSError keeps the run
+// alive and still shows up in the log as an obvious placeholder.
+static id probeGenericErrorStub(id self, SEL _cmd) {
+  return [NSError errorWithDomain:@"ProbeStubbedErrorFactory"
+                             code:-1
+                         userInfo:@{
+                           NSLocalizedDescriptionKey :
+                               @"placeholder from an unimplemented NSError factory"
+                         }];
+}
+
 // Writes each discovery straight to the pasteboard as it happens. The last
 // failure terminated via std::terminate inside _dispatch_client_callout --
 // libdispatch is built without exception unwinding, so an ObjC exception
@@ -226,6 +241,18 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
 
   NSString *name = NSStringFromSelector(sel);
   probeRecordMissing(probeDescribeSelector('+', (Class)self, sel));
+
+  // Unknown NSError factories get a real placeholder error rather than being
+  // left unresolved: an unrecognized one aborts the process (uncatchable when
+  // it happens on a dispatch queue), and a nil return just moves the crash.
+  BOOL isErrorFactory = [NSStringFromClass((Class)self) isEqualToString:@"NSError"] &&
+                        [name hasPrefix:@"errorWith"];
+  if (isErrorFactory) {
+    class_addMethod(object_getClass((Class)self), sel, (IMP)probeGenericErrorStub, "@@:");
+    gProbeInResolver--;
+    return YES;
+  }
+
   BOOL handled = probeLooksLikeCoreSimulator(name);
   if (handled) {
     class_addMethod(object_getClass((Class)self), sel, (IMP)probeMissingSelectorStub, "@@:");

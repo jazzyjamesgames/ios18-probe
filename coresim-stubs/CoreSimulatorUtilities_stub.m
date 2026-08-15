@@ -84,6 +84,8 @@
 @interface NSError (CoreSimulatorUtilities)
 + (NSError *)errorWithSimErrno:(int)simErrno
           localizedDescription:(NSString *)localizedDescription;
++ (NSError *)errorWithPOSIXError:(int)posixError
+                   failureReason:(NSString *)failureReason;
 @end
 
 @implementation NSError (CoreSimulatorUtilities)
@@ -94,6 +96,27 @@
       : nil;
   return [NSError errorWithDomain:@"com.apple.CoreSimulator.SimError"
                              code:simErrno
+                         userInfo:userInfo];
+}
+
+// Sibling factory, found the same way: once the RuntimeRoot directory
+// existed, SimRuntime got past the 401 check and hit THIS on its next error
+// path -- so whatever fails after RuntimeRoot exists is a POSIX-level
+// failure (a stat/open of something inside it). Real implementation:
+// NSPOSIXErrorDomain plus the caller's reason, so strerror-style diagnosis
+// survives into the log and tells us which file it actually wanted.
++ (NSError *)errorWithPOSIXError:(int)posixError
+                   failureReason:(NSString *)failureReason {
+  NSMutableDictionary *userInfo = [NSMutableDictionary dictionary];
+  const char *desc = strerror(posixError);
+  if (desc) {
+    userInfo[NSLocalizedDescriptionKey] = @(desc);
+  }
+  if (failureReason) {
+    userInfo[NSLocalizedFailureReasonErrorKey] = failureReason;
+  }
+  return [NSError errorWithDomain:NSPOSIXErrorDomain
+                             code:posixError
                          userInfo:userInfo];
 }
 @end
