@@ -15,6 +15,7 @@
 #import <dlfcn.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
+#import <objc/objc-exception.h>
 
 @interface NSExtension : NSObject
 @property(nonatomic, strong, readwrite) NSArray *preferredLanguages;
@@ -223,25 +224,45 @@ static BOOL probeFileExistsIsDir(id self, SEL _cmd, NSString *path, BOOL *isDir)
 // Writes to DISK first (cheap, local, cannot block on another process), and
 // only then attempts the pasteboard -- so a slow pasteboard can't cost us the
 // findings.
-static void probeUncaughtExceptionHandler(NSException *ex) {
-  char buf[4096];
-  snprintf(buf, sizeof(buf),
-           "\n\n*** UNCAUGHT EXCEPTION (captured before abort) ***\n"
-           "  name: %s\n  reason: %s\n",
-           ex.name ? [ex.name UTF8String] : "?",
-           ex.reason ? [ex.reason UTF8String] : "?");
-  NSMutableString *entry = [NSMutableString stringWithUTF8String:buf];
+// Where a captured exception is parked for the NEXT launch to publish.
+// Writing it straight to the pasteboard from the handler is what failed
+// before: the pasteboard is served by another process, that call can block,
+// and abort() follows immediately -- so nothing ever landed. A local file
+// write can't block on anyone else.
+static NSString *gExceptionCrumbPath;
+
+static void probeWriteExceptionCrumb(NSException *ex) {
+  if (!gExceptionCrumbPath) return;
+  NSMutableString *entry = [NSMutableString string];
+  [entry appendString:@"\n*** UNCAUGHT EXCEPTION (from the previous run) ***\n"];
+  [entry appendFormat:@"  name: %s\n", ex.name ? [ex.name UTF8String] : "?"];
+  [entry appendFormat:@"  reason: %s\n", ex.reason ? [ex.reason UTF8String] : "?"];
   for (NSString *frame in ex.callStackSymbols) {
     [entry appendFormat:@"  %s\n", [frame UTF8String]];
   }
+  [entry writeToFile:gExceptionCrumbPath
+          atomically:YES
+            encoding:NSUTF8StringEncoding
+               error:nil];
+  NSLog(@"[PROBE] captured exception: %s",
+        ex.reason ? [ex.reason UTF8String] : "?");
+}
 
-  NSString *combined = [(gLastPublished ?: @"") stringByAppendingString:entry];
-  gLastPublished = combined;
-  if (gLogPath) {
-    [combined writeToFile:gLogPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+// libobjc's hook, not Foundation's. The assertion is thrown on
+// CoreSimulator's dispatch queue and dies via
+//   objc_exception_throw -> __cxa_throw -> std::__terminate -> _objc_terminate
+// _objc_terminate consults the handler set by objc_setUncaughtExceptionHandler.
+// NSSetUncaughtExceptionHandler installs FOUNDATION's, which only runs off
+// UIApplication's run loop -- so it never fired for this crash at all.
+static void probeObjcUncaughtHandler(id exception) {
+  if ([exception isKindOfClass:[NSException class]]) {
+    probeWriteExceptionCrumb((NSException *)exception);
   }
-  NSLog(@"[PROBE]%s", buf);
-  [UIPasteboard generalPasteboard].string = combined;
+}
+
+static void probeUncaughtExceptionHandler(NSException *ex) {
+  // Same disk-only treatment; no pasteboard from a dying process.
+  probeWriteExceptionCrumb(ex);
 }
 
 // Runs work on another queue and gives up waiting after `seconds`. A hang
@@ -451,9 +472,12 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
   // install, and an abort inside a dispatch barrier can end the process at
   // any point without running anything at the end of launch.
   gTextView = tv;
-  // Installed before any probe work so it covers everything, including the
-  // uncatchable assertions CoreSimulator raises on its own dispatch queues.
+  gExceptionCrumbPath = [docs stringByAppendingPathComponent:@"last-exception.txt"];
+  // BOTH hooks: Foundation's for anything on the main run loop, and libobjc's
+  // for the dispatch-queue terminations that killed device creation. Only the
+  // latter fires for those, which is why nothing was captured before.
   NSSetUncaughtExceptionHandler(&probeUncaughtExceptionHandler);
+  objc_setUncaughtExceptionHandler(&probeObjcUncaughtHandler);
   void (^flush)(void) = ^{
     probePublish();
   };
@@ -466,6 +490,23 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
   // the work in the background keeps the UI live no matter what the
   // framework does.
   dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+
+  // Surface anything the previous run died on, FIRST, before doing anything
+  // that might crash again. This is the channel that finally works: the
+  // crashing process writes a local file (which can't block), and the next
+  // launch reads it out to the clipboard.
+  NSString *crumb = [NSString stringWithContentsOfFile:gExceptionCrumbPath
+                                              encoding:NSUTF8StringEncoding
+                                                 error:nil];
+  if (crumb.length) {
+    [log appendString:@"=== PREVIOUS RUN DIED WITH ===\n"];
+    [log appendString:crumb];
+    [log appendString:@"=== end of previous-run exception ===\n\n"];
+    [[NSFileManager defaultManager] removeItemAtPath:gExceptionCrumbPath error:nil];
+  } else {
+    [log appendString:@"(no exception recorded from a previous run)\n\n"];
+  }
+  flush();
 
   NSString *bundlePath = [[NSBundle mainBundle] pathForResource:@"target"
                                                            ofType:@"dylib"];
