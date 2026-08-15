@@ -16,6 +16,7 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <objc/objc-exception.h>
+#import "RuntimeFetcher.h"
 
 @interface NSExtension : NSObject
 @property(nonatomic, strong, readwrite) NSArray *preferredLanguages;
@@ -449,6 +450,24 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
                  action:@selector(copyLogTapped:)
        forControlEvents:UIControlEventTouchUpInside];
   [vc.view addSubview:copyButton];
+
+  // Deliberately a button, not automatic. The full RuntimeRoot is several GB
+  // compressed and ~16GB extracted; nothing that large should start on its
+  // own just because the app launched.
+  UIButton *fetchButton = [UIButton buttonWithType:UIButtonTypeSystem];
+  fetchButton.frame = CGRectMake(20, bounds.size.height - 150,
+                                 bounds.size.width - 40, 60);
+  fetchButton.autoresizingMask =
+      UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleTopMargin;
+  fetchButton.backgroundColor = [UIColor systemGreenColor];
+  fetchButton.tintColor = [UIColor whiteColor];
+  fetchButton.titleLabel.font = [UIFont boldSystemFontOfSize:18];
+  fetchButton.layer.cornerRadius = 12;
+  [fetchButton setTitle:@"DOWNLOAD REAL RUNTIME" forState:UIControlStateNormal];
+  [fetchButton addTarget:self
+                  action:@selector(fetchRuntimeTapped:)
+        forControlEvents:UIControlEventTouchUpInside];
+  [vc.view addSubview:fetchButton];
 
   self.window.rootViewController = vc;
   [self.window makeKeyAndVisible];
@@ -1588,6 +1607,68 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
   });  // end background probe block
 
   return YES;
+}
+
+- (void)fetchRuntimeTapped:(UIButton *)sender {
+  [sender setTitle:@"DOWNLOADING..." forState:UIControlStateNormal];
+  sender.enabled = NO;
+
+  NSString *docs = NSSearchPathForDirectoriesInDomains(
+                       NSDocumentDirectory, NSUserDomainMask, YES)
+                       .firstObject;
+  NSString *dest = [docs stringByAppendingPathComponent:@"rt-download"];
+
+  // Off the main thread: this is network + multi-GB disk work, and blocking
+  // the main thread is what got the app watchdog-killed earlier in this
+  // project.
+  dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+    NSMutableString *out = [NSMutableString stringWithString:
+                                                @"=== RUNTIME DOWNLOAD ===\n"];
+    void (^publish)(void) = ^{
+      NSString *snapshot = [out copy];
+      gLastPublished = snapshot;
+      dispatch_async(dispatch_get_main_queue(), ^{
+        gTextView.text = snapshot;
+        [UIPasteboard generalPasteboard].string = snapshot;
+      });
+    };
+
+    NSError *err = nil;
+    BOOL ok = [RuntimeFetcher fetchTag:@"runtime-ios17.2"
+                                  into:dest
+                              progress:^(NSString *line) {
+                                [out appendFormat:@"%@\n", line];
+                                publish();
+                              }
+                                 error:&err];
+
+    [out appendFormat:@"\nresult: %@\n", ok ? @"SUCCESS" : @"FAILED"];
+    if (err) [out appendFormat:@"error: %@\n", err.localizedDescription];
+
+    // Show what actually landed, so success is verifiable rather than asserted.
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *rr = [dest stringByAppendingPathComponent:@"RuntimeRoot"];
+    NSArray *subpaths = [fm subpathsOfDirectoryAtPath:rr error:NULL];
+    [out appendFormat:@"\n%lu paths under RuntimeRoot/\n",
+                      (unsigned long)subpaths.count];
+    for (NSString *p in [subpaths sortedArrayUsingSelector:@selector(compare:)]) {
+      NSString *full = [rr stringByAppendingPathComponent:p];
+      NSDictionary *attrs = [fm attributesOfItemAtPath:full error:NULL];
+      [out appendFormat:@"  %@ (%llu bytes)\n", p,
+                        (unsigned long long)[attrs fileSize]];
+      if (out.length > 20000) {
+        [out appendString:@"  ...(truncated)\n"];
+        break;
+      }
+    }
+    publish();
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+      [sender setTitle:ok ? @"DOWNLOAD DONE -- copy log" : @"DOWNLOAD FAILED -- copy log"
+              forState:UIControlStateNormal];
+      sender.enabled = YES;
+    });
+  });
 }
 
 - (void)copyLogTapped:(UIButton *)sender {

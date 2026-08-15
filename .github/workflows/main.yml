@@ -578,9 +578,13 @@ jobs:
       - name: Compile Probe app
         run: |
           SDK=$(DEVELOPER_DIR="$IOS18_DEVELOPER_DIR" xcrun --sdk iphoneos --show-sdk-path)
+          # -lz: RuntimeFetcher inflates the gzip stream with zlib, which iOS
+          # already ships -- that's precisely why CI repacks the runtime as
+          # tar.gz instead of leaving it as a UDIF/APFS dmg the device has no
+          # way to read.
           DEVELOPER_DIR="$IOS18_DEVELOPER_DIR" clang -arch arm64 -isysroot "$SDK" -miphoneos-version-min=15.0 \
-                -fobjc-arc -framework UIKit -framework Foundation \
-                -o ProbeBin Probe/main.m
+                -fobjc-arc -framework UIKit -framework Foundation -lz \
+                -o ProbeBin Probe/main.m Probe/RuntimeFetcher.m
 
       - name: Compile LaunchHelper extension
         run: |
