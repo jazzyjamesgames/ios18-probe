@@ -253,6 +253,39 @@ jobs:
             done
           fi
 
+          # Disassemble SimRuntime's registration + availability validation
+          # from the CoreSimulator binary itself. The device reported
+          # SimError 401 "Runtime bundle is missing a RuntimeRoot" from
+          # -[SimRuntime initWithBundle:error:]; reading the real code shows
+          # exactly WHAT it checks (just the directory's existence, or
+          # specific files inside like the dyld shared cache), which decides
+          # whether the whole 16GB tree is needed or only a subset.
+          echo "=== disassembling SimRuntime validation methods ==="
+          otool -tV coresim_thin.bin > cs-disasm.txt 2>/dev/null || true
+          wc -l cs-disasm.txt
+          for fn in \
+            "initWithBundle:error:" \
+            "isAvailableWithError:" \
+            "runtimeRootURL" \
+            "libLaunchURL" \
+            "dyldSharedCacheIsUsable"; do
+            echo "=== -[SimRuntime $fn] ==="
+            LINE=$(grep -nF "SimRuntime $fn]:" cs-disasm.txt | head -1 | cut -d: -f1)
+            if [ -n "$LINE" ]; then
+              sed -n "${LINE},$((LINE+140))p" cs-disasm.txt \
+                | tee "profile-out/disasm-SimRuntime-$(echo $fn | tr -d ':').txt"
+            else
+              echo "(not found)" | tee "profile-out/disasm-SimRuntime-$(echo $fn | tr -d ':').txt"
+            fi
+          done
+
+          # The literal strings near those checks (RuntimeRoot, usr/lib/dyld,
+          # System/..., dyld_shared_cache_*) reveal the exact paths probed.
+          echo "=== RuntimeRoot-relative path strings in the binary ==="
+          strings -a coresim_thin.bin 2>/dev/null \
+            | grep -iE "RuntimeRoot|dyld_shared_cache|usr/lib/dyld|/System/Library/Caches|libLaunch|shared_cache" \
+            | sort -u | head -40 | tee profile-out/runtimeroot-strings.txt || true
+
           # Device types are now registering on-device, so the runtime is the
           # whole remaining question -- and it's the half that carries iOS 18
           # itself. Settle definitively whether this runner has ANY usable
