@@ -72,12 +72,21 @@ static id probeMissingSelectorStub(id self, SEL _cmd) { return nil; }
 // progressive-construction pass. A real (if generic) NSError keeps the run
 // alive and still shows up in the log as an obvious placeholder.
 static id probeGenericErrorStub(id self, SEL _cmd) {
+  // Names the selector it stood in for. The first version returned a fixed
+  // string, and when isAvailableWithError: went through an unimplemented
+  // factory the placeholder replaced the real reason with no clue as to
+  // WHICH factory to implement -- costing a whole device round trip. _cmd is
+  // right there, so say it. Built with stringWithUTF8String/sel_getName
+  // rather than %@ formatting, since this can run inside selector resolution
+  // (see probeDescribeSelector).
+  char buf[256];
+  snprintf(buf, sizeof(buf),
+           "placeholder from unimplemented NSError factory +[NSError %s]",
+           sel_getName(_cmd));
+  NSString *desc = [NSString stringWithUTF8String:buf] ?: @"placeholder error";
   return [NSError errorWithDomain:@"ProbeStubbedErrorFactory"
                              code:-1
-                         userInfo:@{
-                           NSLocalizedDescriptionKey :
-                               @"placeholder from an unimplemented NSError factory"
-                         }];
+                         userInfo:@{NSLocalizedDescriptionKey : desc}];
 }
 
 // Writes each discovery straight to the pasteboard as it happens. The last

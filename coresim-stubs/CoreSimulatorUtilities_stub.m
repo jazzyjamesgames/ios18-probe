@@ -86,6 +86,7 @@
           localizedDescription:(NSString *)localizedDescription;
 + (NSError *)errorWithPOSIXError:(int)posixError
                    failureReason:(NSString *)failureReason;
++ (NSError *)errorWithSimErrno:(int)simErrno userInfo:(NSDictionary *)userInfo;
 @end
 
 @implementation NSError (CoreSimulatorUtilities)
@@ -117,6 +118,17 @@
   }
   return [NSError errorWithDomain:NSPOSIXErrorDomain
                              code:posixError
+                         userInfo:userInfo];
+}
+
+// Third variant of the same family (userInfo: rather than
+// localizedDescription:). This is the one -[SimRuntime isAvailableWithError:]
+// uses, so without it the actual reason a runtime is unavailable never
+// surfaces -- the probe's generic placeholder stood in and hid it. Same
+// domain as the other SimErrno factory; the caller supplies userInfo whole.
++ (NSError *)errorWithSimErrno:(int)simErrno userInfo:(NSDictionary *)userInfo {
+  return [NSError errorWithDomain:@"com.apple.CoreSimulator.SimError"
+                             code:simErrno
                          userInfo:userInfo];
 }
 @end
