@@ -113,6 +113,7 @@ static void smTrySpawn(NSArray *args, NSMutableString *dump) {
 
 Boolean SMJobSubmit(CFStringRef domain, CFDictionaryRef jobDict,
                     void *auth, CFErrorRef *outError) {
+  CFErrorRef err = NULL;
   @autoreleasepool {
     NSDictionary *job = (__bridge NSDictionary *)jobDict;
 
@@ -151,6 +152,20 @@ Boolean SMJobSubmit(CFStringRef domain, CFDictionaryRef jobDict,
              encoding:NSUTF8StringEncoding
                 error:NULL];
 
+    // Built here but deliberately NOT autoreleased, and handed over below,
+    // outside the pool.
+    //
+    // The first version of this called CFAutorelease() and returned from
+    // inside the @autoreleasepool block. The pool drains at the closing brace,
+    // which happens BEFORE the function returns, so the caller received a
+    // pointer to a freed CFError, retained it, and died -- a hard crash with
+    // no exception, which is why the run simply stopped after
+    // "E. bootWithOptions:" with nothing after it.
+    //
+    // CFErrorCreate copies the userInfo dictionary, so it is fine for that to
+    // be autoreleased. Ownership passes to the caller, which retains it; that
+    // leaks a single reference per failed boot, which is the right trade
+    // against handing back a dangling pointer.
     if (outError) {
       NSDictionary *info = @{
         (__bridge NSString *)kCFErrorLocalizedDescriptionKey:
@@ -158,13 +173,14 @@ Boolean SMJobSubmit(CFStringRef domain, CFDictionaryRef jobDict,
             @"job to. The job dictionary and the result of attempting the "
             @"spawn directly were captured to Documents/launchd-job.txt.",
       };
-      CFErrorRef err = CFErrorCreate(kCFAllocatorDefault,
-                                     CFSTR("com.apple.CoreSimulator.SimError"),
-                                     405, (__bridge CFDictionaryRef)info);
-      *outError = (CFErrorRef)CFAutorelease(err);
+      err = CFErrorCreate(kCFAllocatorDefault,
+                          CFSTR("com.apple.CoreSimulator.SimError"),
+                          405, (__bridge CFDictionaryRef)info);
     }
-    return false;
   }
+
+  if (outError) *outError = err;
+  return false;
 }
 
 Boolean SMJobRemove(CFStringRef domain, CFStringRef jobLabel, void *auth,
