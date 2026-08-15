@@ -200,6 +200,41 @@ static BOOL probeFileExistsIsDir(id self, SEL _cmd, NSString *path, BOOL *isDir)
   return r;
 }
 
+// Captures NSAssert failures. Device creation dies inside an assertion on
+// CoreSimulator's own bootstrap queue: an uncatchable abort that the log
+// can't reach and that no longer even produces a fresh crash report. But
+// NSAssert routes through NSAssertionHandler first, so intercepting that
+// yields the function, file, line and message -- everything the crash
+// report would have told us -- while the process is still alive.
+//
+// Publishes SYNCHRONOUSLY: the usual dispatch_async to the main thread would
+// never run, because abort() follows immediately.
+static IMP gOrigAssertHandler;
+
+static void probeAssertHandler(id self, SEL _cmd, NSString *func, NSString *file,
+                                NSInteger line, NSString *desc) {
+  char buf[2048];
+  snprintf(buf, sizeof(buf),
+           "\n\n*** NSASSERT FAILED (captured before abort) ***\n"
+           "  function: %s\n  file: %s\n  line: %ld\n  message: %s\n",
+           func ? [func UTF8String] : "?", file ? [file UTF8String] : "?",
+           (long)line, desc ? [desc UTF8String] : "?");
+  NSString *entry = [NSString stringWithUTF8String:buf] ?: @"(assert, unprintable)";
+
+  NSString *combined = [(gLastPublished ?: @"") stringByAppendingString:entry];
+  gLastPublished = combined;
+  if (gLogPath) {
+    [combined writeToFile:gLogPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+  }
+  [UIPasteboard generalPasteboard].string = combined;
+  NSLog(@"[PROBE] %s", buf);
+
+  if (gOrigAssertHandler) {
+    ((void (*)(id, SEL, NSString *, NSString *, NSInteger, NSString *))gOrigAssertHandler)(
+        self, _cmd, func, file, line, desc);
+  }
+}
+
 // Runs work on another queue and gives up waiting after `seconds`. A hang
 // inside CoreSimulator can't be cancelled, but it can be survived: the
 // blocked thread is simply abandoned (fine for a probe) while the run
@@ -1435,6 +1470,20 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
                            ctxType ? @"yes" : @"nil", ctxRuntime ? @"yes" : @"nil",
                            deviceSet ? @"yes" : @"nil"];
         flush();
+        // Capture the assertion that kills this step, and trace every file it
+        // reads on the way there -- the same two techniques that cracked the
+        // availability check.
+        Method am = class_getInstanceMethod(
+            [NSAssertionHandler class],
+            @selector(handleFailureInFunction:file:lineNumber:description:));
+        if (am) gOrigAssertHandler = method_setImplementation(am, (IMP)probeAssertHandler);
+        [tlock lock];
+        gFileTrace = [NSMutableArray array];
+        [tlock unlock];
+        gOrigFileExists = method_setImplementation(m1, (IMP)probeFileExists);
+        gOrigFileExistsIsDir = method_setImplementation(m2, (IMP)probeFileExistsIsDir);
+        gTracingFiles = YES;
+
         __block NSString *outD = @"(did not finish)";
         if (deviceSet && ctxType && ctxRuntime) {
           BOOL okD = probeRunWithTimeout(60.0, ^{
@@ -1460,6 +1509,16 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
         } else {
           [log appendString:@"   skipped -- a prerequisite above came back nil\n"];
         }
+        gTracingFiles = NO;
+        method_setImplementation(m1, gOrigFileExists);
+        method_setImplementation(m2, gOrigFileExistsIsDir);
+        [tlock lock];
+        NSArray *traceD = [gFileTrace copy];
+        [tlock unlock];
+        [log appendFormat:@"\n%lu filesystem checks during creation:\n%@\n",
+                           (unsigned long)traceD.count,
+                           traceD.count ? [traceD componentsJoinedByString:@"\n"]
+                                        : @"(none)"];
         flush();
       }
     }
