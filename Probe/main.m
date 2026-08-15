@@ -181,40 +181,57 @@ static void probeRecordMissing(NSString *description) {
   if (isNew) NSLog(@"[PROBE] missing selector: %@", description);
 }
 
+// Formats WITHOUT %@ on purpose. The previous version used
+// +[NSString stringWithFormat:@"-[%@ %@]", ...], and %@ makes Foundation
+// probe its argument for description selectors -- that probe goes through
+// selector RESOLUTION, which re-enters this very hook, which formats another
+// %@... The device died with an 86-deep recursion between
+// probeResolveInstanceMethod and __CFStringAppendFormatCore. snprintf with
+// %s is pure C and touches no Objective-C machinery.
+static NSString *probeDescribeSelector(char kind, Class cls, SEL sel) {
+  char buf[512];
+  snprintf(buf, sizeof(buf), "%c[%s %s]", kind, class_getName(cls), sel_getName(sel));
+  NSString *result = [NSString stringWithUTF8String:buf];
+  return result ?: @"(unprintable selector)";
+}
+
+// Belt and braces alongside the %@ fix: if anything inside this hook ever
+// triggers selector resolution again, the nested call bails out immediately
+// instead of recursing. Thread-local, since the hook runs on any thread.
+static __thread int gProbeInResolver = 0;
+
 static BOOL probeResolveInstanceMethod(id self, SEL _cmd, SEL sel) {
+  if (gProbeInResolver) return NO;
+  gProbeInResolver++;
+
   NSString *name = NSStringFromSelector(sel);
-  probeRecordMissing(
-      [NSString stringWithFormat:@"-[%@ %@]", NSStringFromClass((Class)self), name]);
-  // Only stub CoreSimulator's own category methods. The previous run stubbed
-  // EVERY unresolved selector, including Foundation internals that are
-  // supposed to be dynamically resolved or to fail
-  // (encodeWithOSLogCoder:options:maxLength:,
-  // _dynamicContextEvaluation:patternString:) -- returning nil for those
-  // corrupted string formatting so badly that the log came back with
-  // "%@NSCONTEXT" where real paths and exception names should have been.
-  // Log everything, but only interfere where we actually mean to.
-  if (!probeLooksLikeCoreSimulator(name)) return NO;
-  class_addMethod((Class)self, sel, (IMP)probeMissingSelectorStub, "@@:");
-  return YES;
+  probeRecordMissing(probeDescribeSelector('-', (Class)self, sel));
+  BOOL handled = probeLooksLikeCoreSimulator(name);
+  if (handled) {
+    class_addMethod((Class)self, sel, (IMP)probeMissingSelectorStub, "@@:");
+  }
+  gProbeInResolver--;
+  return handled;
 }
 
 // Class methods resolve through a completely separate path
 // (+resolveClassMethod:, not +resolveInstanceMethod:), which is why the
-// instance-only hook above saw nothing before +[NSError ...] aborted the
-// process. Note the target of class_addMethod here is the METAclass --
-// that's where class methods live.
+// instance-only hook saw nothing before +[NSError ...] aborted the process.
+// Note the target of class_addMethod here is the METAclass -- that's where
+// class methods live. Same %@-free formatting and re-entrancy guard as
+// above, for the same reason.
 static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
+  if (gProbeInResolver) return NO;
+  gProbeInResolver++;
+
   NSString *name = NSStringFromSelector(sel);
-  probeRecordMissing(
-      [NSString stringWithFormat:@"+[%@ %@]", NSStringFromClass((Class)self), name]);
-  // Stubbed for sim_-prefixed selectors as before, and also for anything on
-  // NSError: this crash is uncatchable, so without a stub the process dies
-  // at the first one and any selectors after it stay invisible. A nil return
-  // from an NSError factory is at least plausibly-shaped, and whatever
-  // breaks downstream of it is its own signal.
-  if (!probeLooksLikeCoreSimulator(name)) return NO;
-  class_addMethod(object_getClass((Class)self), sel, (IMP)probeMissingSelectorStub, "@@:");
-  return YES;
+  probeRecordMissing(probeDescribeSelector('+', (Class)self, sel));
+  BOOL handled = probeLooksLikeCoreSimulator(name);
+  if (handled) {
+    class_addMethod(object_getClass((Class)self), sel, (IMP)probeMissingSelectorStub, "@@:");
+  }
+  gProbeInResolver--;
+  return handled;
 }
 
 @interface AppDelegate : UIResponder <UIApplicationDelegate>
