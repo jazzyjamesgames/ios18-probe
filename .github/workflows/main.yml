@@ -725,7 +725,46 @@ jobs:
           mkdir -p "$FW"
           cp coresim_patched.dylib "$FW/CoreSimulator"
           cp coresim-stubs/CoreSimulator-Framework-Info.plist "$FW/Info.plist"
-          find "$FW"
+
+          # The six *.simdeviceio plugin bundles (framebuffer, HID, audio,
+          # rendering, GPU port vendor, stream processor). Boot now fails at
+          # "Failed to retrieve paths for simdeviceio bundles": having found
+          # the framework, it enumerates these out of its Resources.
+          #
+          # Placed flat in the framework because our bundle is the flat iOS
+          # layout, not macOS Versions/A/, so NSBundle's resourcePath IS the
+          # framework directory.
+          #
+          # Each carries a macOS binary, thinned to arm64e and platform-flipped
+          # the same way CoreSimulator itself was -- dyld would otherwise
+          # reject them with "(have 'macOS', need 'iOS')". Dependency paths
+          # are deliberately left alone: which of their dependencies actually
+          # resolve on iOS is the next thing to learn.
+          SRC_RES=/Library/Developer/PrivateFrameworks/CoreSimulator.framework/Versions/A/Resources
+          for dio in "$SRC_RES"/*.simdeviceio; do
+            [ -d "$dio" ] || continue
+            NAME=$(basename "$dio")
+            cp -R "$dio" "$FW/$NAME"
+            rm -rf "$FW/$NAME/Contents/_CodeSignature"
+            BIN=$(find "$FW/$NAME" -type f -perm +111 ! -name "*.plist" | head -1)
+            if [ -n "$BIN" ]; then
+              if lipo -thin arm64e "$BIN" -output /tmp/dio_thin 2>/dev/null \
+                 || lipo -thin arm64 "$BIN" -output /tmp/dio_thin 2>/dev/null; then
+                python3 tools/patch_platform.py /tmp/dio_thin /tmp/dio_patched
+                cp /tmp/dio_patched "$BIN"
+                echo "patched $NAME -> $(basename "$BIN")"
+              else
+                # Already thin, or an arch we can't extract; patch in place.
+                python3 tools/patch_platform.py "$BIN" /tmp/dio_patched \
+                  && cp /tmp/dio_patched "$BIN" && echo "patched (thin) $NAME"
+              fi
+            else
+              echo "no executable found in $NAME"
+            fi
+          done
+
+          du -sh "$FW"
+          find "$FW" -maxdepth 2
 
           cp -R staged-profiles Payload/Probe.app/RealProfiles
           # Metadata-only runtime bundle, if the mount step produced one.
