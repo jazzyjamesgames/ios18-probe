@@ -67,6 +67,17 @@ jobs:
           file coresim_thin.bin
           python3 tools/patch_coresimulator.py coresim_thin.bin coresim_patched.dylib
 
+          # loadAllBundlesWithError: asks for the .simdeviceio plugins with a
+          # hardcoded subdirectory:@"Resources", which is where the macOS
+          # framework keeps them. We can't have a Resources/ directory inside
+          # an embedded framework -- it changes the bundle layout CFBundle
+          # infers and installd then rejects the whole app -- and the device
+          # confirmed the same query with a nil subdirectory finds all six
+          # sitting flat next to the binary. Rewrite that one argument.
+          python3 tools/patch_simdeviceio_lookup.py \
+            coresim_patched.dylib coresim_patched2.dylib
+          mv coresim_patched2.dylib coresim_patched.dylib
+
       - name: Compile CoreSimulator stub libraries
         run: |
           SDK=$(DEVELOPER_DIR="$IOS18_DEVELOPER_DIR" xcrun --sdk iphoneos --show-sdk-path)
