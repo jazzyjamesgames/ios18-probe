@@ -34,5 +34,37 @@
 	<string>6.0</string>
 	<key>MinimumOSVersion</key>
 	<string>15.0</string>
+	<!--
+	  installd rejected the first version of this file outright:
+
+	    "Info.plist from bundle at path .../CoreSimulator.framework had none
+	     of the keys that we expect ... keyCount=8"
+
+	  An embedded framework needs the platform/build keys below, not just the
+	  generic CFBundle* set. CFBundleSupportedPlatforms is the important one --
+	  without it installd cannot tell this is an iOS framework and refuses the
+	  whole app. The DT* keys are what Xcode stamps into any real framework;
+	  they're cheap to include and make this look like the genuine article to
+	  the installer. Values match the iOS 18.1 SDK the rest of the app is
+	  built against.
+	-->
+	<key>CFBundleSupportedPlatforms</key>
+	<array>
+		<string>iPhoneOS</string>
+	</array>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>DTPlatformName</key>
+	<string>iphoneos</string>
+	<key>DTPlatformVersion</key>
+	<string>18.1</string>
+	<key>DTSDKName</key>
+	<string>iphoneos18.1</string>
+	<key>DTCompiler</key>
+	<string>com.apple.compilers.llvm.clang.1_0</string>
+	<key>UIDeviceFamily</key>
+	<array>
+		<integer>1</integer>
+	</array>
 </dict>
 </plist>
