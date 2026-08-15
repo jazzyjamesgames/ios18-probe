@@ -339,6 +339,33 @@ jobs:
                 -Wl,-e,_NSExtensionMain \
                 -o LaunchHelperBin LaunchHelper/main.m
 
+      - name: Stage a real .simdevicetype for the app to feed CoreSimulator
+        run: |
+          # Ship Apple's genuine article rather than a hand-written profile.
+          # The dumped schema showed the guessed one was wrong in ways that
+          # would have failed silently (mainScreenWidth/Height as strings not
+          # a size dict, supportedProductFamilyIDs capitalized,
+          # supportedFeatures a dict not an array, no name/identifier keys at
+          # all -- those live in Info.plist).
+          mkdir -p staged-profiles/DeviceTypes
+
+          DT=$(find /Applications/Xcode_16.1.app -maxdepth 12 -name "iPhone*.simdevicetype" 2>/dev/null | head -1)
+          if [ -z "$DT" ]; then
+            DT=$(find /Applications/Xcode_16.1.app -maxdepth 12 -name "*.simdevicetype" 2>/dev/null | head -1)
+          fi
+          echo "staging real device type: $DT"
+          cp -R "$DT" staged-profiles/DeviceTypes/
+
+          # Drop the macOS executable and the stale signature: a Mach-O built
+          # for macOS has no business inside an iOS app bundle, nothing reads
+          # it to parse a profile, and leaving either in place only risks
+          # upsetting codesign or installd.
+          BN=$(basename "$DT")
+          rm -rf "staged-profiles/DeviceTypes/$BN/Contents/MacOS" \
+                 "staged-profiles/DeviceTypes/$BN/Contents/_CodeSignature"
+
+          find staged-profiles
+
       - name: Assemble .app bundle
         run: |
           mkdir -p Payload/Probe.app
@@ -354,6 +381,9 @@ jobs:
           cp coresim_patched.dylib Payload/Probe.app/coresim_target.dylib
           mkdir -p Payload/Probe.app/Frameworks
           cp coresim-stub-out/* Payload/Probe.app/Frameworks/
+
+          cp -R staged-profiles Payload/Probe.app/RealProfiles
+          find Payload/Probe.app/RealProfiles
 
       - name: Ad-hoc sign with entitlements (App Group intent for AltStore's resign to carry forward)
         run: |

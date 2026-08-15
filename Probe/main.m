@@ -689,18 +689,53 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
         [log appendString:@"\n=== Feeding it a synthetic device-type profile ===\n"];
         flush();
 
+        // First, the genuine article: a real Apple .simdevicetype staged into
+        // the app bundle by CI. No schema guessing at all.
+        NSString *realProfiles = [[[NSBundle mainBundle] bundlePath]
+            stringByAppendingPathComponent:@"RealProfiles/DeviceTypes"];
+        [log appendFormat:@"\nreal profiles dir: %@\n  contents: %@\n", realProfiles,
+                           [[NSFileManager defaultManager] contentsOfDirectoryAtPath:realProfiles
+                                                                               error:nil]];
+        flush();
+        @try {
+          typedef id (*PathMsg)(id, SEL, NSString *);
+          PathMsg pathMsg = (PathMsg)objc_msgSend;
+          pathMsg(liveContext, @selector(supportedDeviceTypesAddProfilesAtPath:), realProfiles);
+          typedef id (*IdMsg)(id, SEL);
+          IdMsg idMsg = (IdMsg)objc_msgSend;
+          id types = idMsg(liveContext, @selector(supportedDeviceTypes));
+          [log appendFormat:@"  supportedDeviceTypes after REAL profile: %@\n", types];
+          if ([types respondsToSelector:@selector(count)] && [types count] > 0) {
+            [log appendString:@"  *** REAL DEVICE TYPE REGISTERED ***\n"];
+          }
+        } @catch (NSException *ex) {
+          [log appendFormat:@"  EXCEPTION: %@ -- %@\n", ex.name, ex.reason];
+        }
+        flush();
+
+        // Schema corrected against the real profile.plist dumped from the CI
+        // runner. The original guesses were wrong in ways that would have
+        // failed silently: sizes are separate top-level STRINGS rather than a
+        // size dict, DPI is split per-axis, scale and minRuntimeVersion are
+        // strings not numbers, supportedProductFamilyIDs capitalizes "IDs",
+        // supportedFeatures is a dict not an array, and there are no name or
+        // identifier keys at all -- those come from Info.plist.
         NSDictionary *profile = @{
-          @"name" : @"Probe Test Device",
-          @"identifier" : @"com.apple.CoreSimulator.SimDeviceType.Probe-Test-Device",
           @"modelIdentifier" : @"iPhone14,7",
-          @"productFamilyId" : @1,
-          @"supportedProductFamilyIds" : @[ @1 ],
-          @"supportedArchs" : @[ @"arm64" ],
-          @"mainScreenSize" : @{@"width" : @1170, @"height" : @2532},
-          @"mainScreenScale" : @3.0,
-          @"mainScreenDpi" : @460,
-          @"minRuntimeVersion" : @0,
-          @"maxRuntimeVersion" : @999999999,
+          @"productClass" : @"D16",
+          @"supportedProductFamilyIDs" : @[ @1 ],
+          @"supportedArchs" : @[ @"arm64", @"arm64e" ],
+          @"mainScreenWidth" : @"1170",
+          @"mainScreenHeight" : @"2532",
+          @"mainScreenWidthDPI" : @460,
+          @"mainScreenHeightDPI" : @460,
+          @"mainScreenScale" : @"3.0",
+          @"minRuntimeVersion" : @"16.1",
+          @"createByDefaultForRuntimeVersions" :
+              @{@"versionMin" : @"16.1", @"versionMax" : @"99.99"},
+          @"supportedFeatures" : @{},
+          @"supportedFeaturesConditionalOnRuntime" : @{},
+          @"environment" : @{},
         };
         NSDictionary *infoPlist = @{
           @"CFBundleIdentifier" : @"com.apple.CoreSimulator.SimDeviceType.Probe-Test-Device",
@@ -708,6 +743,8 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
           @"CFBundlePackageType" : @"BNDL",
           @"CFBundleShortVersionString" : @"1.0",
           @"CFBundleVersion" : @"1",
+          @"CFBundleInfoDictionaryVersion" : @"6.0",
+          @"CFBundleDevelopmentRegion" : @"English",
         };
 
         NSFileManager *fm = [NSFileManager defaultManager];
