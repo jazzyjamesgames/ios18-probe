@@ -1793,6 +1793,7 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
 
     [out appendFormat:@"\nresult: %@\n", ok ? @"SUCCESS" : @"FAILED"];
     if (err) [out appendFormat:@"error: %@\n", err.localizedDescription];
+    publish();  // publish the verdict BEFORE any further work can stall it
 
     // Complete the bundle: the download supplies RuntimeRoot, but a runtime
     // is only loadable with its Info.plist/profile.plist, and device creation
@@ -1824,24 +1825,46 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
                           [fm2 fileExistsAtPath:full] ? @"ok  " : @"MISS", rel];
       }
       [out appendFormat:@"\nregister with:\n  %@\n", runtimesDir];
+      publish();
     }
 
-    // Show what actually landed, so success is verifiable rather than asserted.
+    // Show what landed, WITHOUT walking the whole tree.
+    //
+    // The previous version called subpathsOfDirectoryAtPath: on RuntimeRoot,
+    // which materialises every path into one array before returning -- fine
+    // for the 44-file test slice, pathological for 370,917 files. It stalled
+    // long enough that the "result:" line above never got published, making a
+    // successful 15GB extraction look like a hang.
+    //
+    // Top level plus a few known-interesting paths is enough to confirm this
+    // is a real iOS filesystem rather than a partial one.
     NSFileManager *fm = [NSFileManager defaultManager];
     NSString *rr = [dest stringByAppendingPathComponent:@"RuntimeRoot"];
-    (void)rr;
-    NSArray *subpaths = [fm subpathsOfDirectoryAtPath:rr error:NULL];
-    [out appendFormat:@"\n%lu paths under RuntimeRoot/\n",
-                      (unsigned long)subpaths.count];
-    for (NSString *p in [subpaths sortedArrayUsingSelector:@selector(compare:)]) {
-      NSString *full = [rr stringByAppendingPathComponent:p];
-      NSDictionary *attrs = [fm attributesOfItemAtPath:full error:NULL];
-      [out appendFormat:@"  %@ (%llu bytes)\n", p,
-                        (unsigned long long)[attrs fileSize]];
-      if (out.length > 20000) {
-        [out appendString:@"  ...(truncated)\n"];
-        break;
-      }
+    NSArray *top = [fm contentsOfDirectoryAtPath:rr error:NULL];
+    [out appendFormat:@"\nRuntimeRoot top level (%lu entries):\n  %@\n",
+                      (unsigned long)top.count,
+                      [[top sortedArrayUsingSelector:@selector(compare:)]
+                          componentsJoinedByString:@" "]];
+
+    for (NSString *probe in @[
+           @"usr/lib/system/host/liblaunch_sim.dylib",
+           @"usr/lib/dyld_sim",
+           @"System/Library/CoreServices/SystemVersion.plist",
+           @"System/Library/Caches/com.apple.dyld",
+           @"System/Library/CoreServices/SpringBoard.app",
+           @"sbin/launchd_sim",
+         ]) {
+      NSString *full = [rr stringByAppendingPathComponent:probe];
+      BOOL isDir = NO;
+      BOOL exists = [fm fileExistsAtPath:full isDirectory:&isDir];
+      unsigned long long sz =
+          exists && !isDir
+              ? [[fm attributesOfItemAtPath:full error:NULL] fileSize]
+              : 0;
+      [out appendFormat:@"  %@ %@%@\n", exists ? @"ok  " : @"MISS", probe,
+                        (exists && !isDir)
+                            ? [NSString stringWithFormat:@" (%llu bytes)", sz]
+                            : (isDir ? @" (dir)" : @"")];
     }
     publish();
 
