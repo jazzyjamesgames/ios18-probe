@@ -819,6 +819,37 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
     NSBundle *idLookup = [NSBundle bundleWithIdentifier:@"com.apple.CoreSimulator"];
     [log appendFormat:@"bundleWithIdentifier:com.apple.CoreSimulator -> %@\n",
                        idLookup ? idLookup.bundlePath : @"STILL NOT FOUND"];
+
+    // Ask exactly what loadAllBundlesWithError: asks. It fails with "Failed to
+    // retrieve paths for simdeviceio bundles" even though the six .simdeviceio
+    // bundles are now inside the framework, and ".simdeviceio" is the only
+    // relevant string in the binary -- so it's resolving them through NSBundle
+    // resource lookup. Reproducing that lookup here shows whether the problem
+    // is the layout (flat vs Versions/A/Resources), the resourcePath, or
+    // something else entirely, without another disassembly round.
+    if (idLookup) {
+      [log appendFormat:@"  bundlePath:   %@\n  resourcePath: %@\n",
+                         idLookup.bundlePath, idLookup.resourcePath];
+      NSArray *urls = [idLookup URLsForResourcesWithExtension:@"simdeviceio"
+                                                subdirectory:nil];
+      [log appendFormat:@"  URLsForResourcesWithExtension:@\"simdeviceio\" -> %lu\n",
+                         (unsigned long)urls.count];
+      for (NSURL *u in urls) [log appendFormat:@"    %@\n", u.lastPathComponent];
+
+      // Same query against the alternative layouts, to identify which one it
+      // actually wants if the flat one comes back empty.
+      for (NSString *sub in @[ @"Resources", @"Versions/A/Resources" ]) {
+        NSArray *subUrls = [idLookup URLsForResourcesWithExtension:@"simdeviceio"
+                                                     subdirectory:sub];
+        [log appendFormat:@"  subdirectory:%@ -> %lu\n", sub,
+                           (unsigned long)subUrls.count];
+      }
+
+      NSArray *onDisk = [[NSFileManager defaultManager]
+          contentsOfDirectoryAtPath:idLookup.bundlePath error:NULL];
+      [log appendFormat:@"  actually on disk in the framework: %@\n",
+                         [onDisk componentsJoinedByString:@" "]];
+    }
     flush();
 
     // Loaded successfully, but nothing has actually been *called* yet.

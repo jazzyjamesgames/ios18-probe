@@ -763,6 +763,17 @@ jobs:
             fi
           done
 
+          # Also expose them under Resources/. NSBundle's resource lookup for a
+          # FLAT framework treats bundlePath as the resource root, but for the
+          # macOS layout it's Versions/A/Resources -- and the real framework
+          # uses the latter. Hardlinking (falling back to copy) into
+          # Resources/ covers both interpretations without doubling the size.
+          mkdir -p "$FW/Resources"
+          for dio in "$FW"/*.simdeviceio; do
+            [ -d "$dio" ] || continue
+            cp -Rl "$dio" "$FW/Resources/" 2>/dev/null || cp -R "$dio" "$FW/Resources/"
+          done
+
           du -sh "$FW"
           find "$FW" -maxdepth 2
 
