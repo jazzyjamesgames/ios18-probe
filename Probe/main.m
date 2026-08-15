@@ -106,6 +106,18 @@ static NSString *gLogPath;
 static UITextView *gTextView;
 static NSString *gLastPublished;
 
+// Filesystem-check tracing. isAvailableWithError: reports a deliberately
+// generic "runtime is corrupt or missing required files" that names nothing,
+// and two rounds of inferring from it (SystemVersion.plist, dyld/liblaunch
+// stubs, the sim_host_arch cpu_type fix) failed to move it. Rather than keep
+// guessing, swizzle NSFileManager's existence checks and record every path
+// CoreSimulator probes, with the answer it got -- the failing ones ARE the
+// requirement list.
+static NSMutableArray<NSString *> *gFileTrace;
+static BOOL gTracingFiles;
+static IMP gOrigFileExists;
+static IMP gOrigFileExistsIsDir;
+
 // Guards the missing-selector list, which the process-wide selector hooks
 // touch from whatever thread hits an unresolved selector.
 static NSLock *probeLock(void) {
@@ -144,6 +156,27 @@ static void probePublish(void) {
     [UIPasteboard generalPasteboard].string = snapshot;
     gTextView.text = snapshot;
   });
+}
+
+static void probeRecordFileCheck(NSString *path, BOOL existed) {
+  if (!gTracingFiles || !path) return;
+  NSLock *lock = probeLock();
+  [lock lock];
+  [gFileTrace addObject:[NSString stringWithFormat:@"%@ %@",
+                                                   existed ? @"  ok " : @"MISS", path]];
+  [lock unlock];
+}
+
+static BOOL probeFileExists(id self, SEL _cmd, NSString *path) {
+  BOOL r = ((BOOL (*)(id, SEL, NSString *))gOrigFileExists)(self, _cmd, path);
+  probeRecordFileCheck(path, r);
+  return r;
+}
+
+static BOOL probeFileExistsIsDir(id self, SEL _cmd, NSString *path, BOOL *isDir) {
+  BOOL r = ((BOOL (*)(id, SEL, NSString *, BOOL *))gOrigFileExistsIsDir)(self, _cmd, path, isDir);
+  probeRecordFileCheck(path, r);
+  return r;
 }
 
 // Runs work on another queue and gives up waiting after `seconds`. A hang
@@ -1170,6 +1203,44 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
                   [usrLib stringByAppendingPathComponent:@"liblaunch_sim.dylib"]
                               atomically:YES];
             })];
+        flush();
+
+        // Stop inferring from the generic error: record every filesystem
+        // check CoreSimulator makes while deciding availability. Whatever it
+        // probes and does NOT find is the actual requirement list.
+        [log appendString:@"\n=== Tracing filesystem checks during availability ===\n"];
+        gFileTrace = [NSMutableArray array];
+        Method m1 = class_getInstanceMethod([NSFileManager class],
+                                             @selector(fileExistsAtPath:));
+        Method m2 = class_getInstanceMethod([NSFileManager class],
+                                             @selector(fileExistsAtPath:isDirectory:));
+        gOrigFileExists = method_setImplementation(m1, (IMP)probeFileExists);
+        gOrigFileExistsIsDir = method_setImplementation(m2, (IMP)probeFileExistsIsDir);
+        gTracingFiles = YES;
+
+        NSString *traced = buildAndValidate(4, ^(NSString *rr) {
+          makeSystemVersion(rr);
+          NSString *usrLib = [rr stringByAppendingPathComponent:@"usr/lib"];
+          [fm createDirectoryAtPath:usrLib withIntermediateDirectories:YES
+                         attributes:nil error:nil];
+          [[NSData data] writeToFile:[usrLib stringByAppendingPathComponent:@"dyld"]
+                          atomically:YES];
+        });
+
+        gTracingFiles = NO;
+        method_setImplementation(m1, gOrigFileExists);
+        method_setImplementation(m2, gOrigFileExistsIsDir);
+
+        [log appendFormat:@"step 4 (traced): %@\n", traced];
+        NSLock *tlock = probeLock();
+        [tlock lock];
+        NSArray *traceSnapshot = [gFileTrace copy];
+        [tlock unlock];
+        [log appendFormat:@"\n%lu filesystem checks recorded:\n%@\n",
+                           (unsigned long)traceSnapshot.count,
+                           traceSnapshot.count
+                               ? [traceSnapshot componentsJoinedByString:@"\n"]
+                               : @"(none -- CoreSimulator uses raw stat(), not NSFileManager)"];
         flush();
       }
     }
