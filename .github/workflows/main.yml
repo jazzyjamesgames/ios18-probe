@@ -268,6 +268,8 @@ jobs:
             "isAvailableWithError:" \
             "runtimeRootURL" \
             "libLaunchURL" \
+            "createInitialContentPath:error:" \
+            "sampleContentPath" \
             "dyldSharedCacheIsUsable"; do
             echo "=== -[SimRuntime $fn] ==="
             LINE=$(grep -nF "SimRuntime $fn]:" cs-disasm.txt | head -1 | cut -d: -f1)
@@ -375,6 +377,27 @@ jobs:
 
               echo "=== how big is the RuntimeRoot we are NOT shipping ==="
               du -sh "$RT" 2>/dev/null | tee profile-out/runtime-size.txt || true
+
+              # Device creation got FAR: CoreSimulator assigned a UDID, started
+              # the device's bootstrap queue, and began populating its data
+              # from the runtime's SampleContent -- then NSAssert'd on a nil
+              # dictionary because our synthetic RuntimeRoot has no
+              # SampleContent. Get the real structure and size: if it's small,
+              # it can be shipped or synthesized; if it's huge, that bounds
+              # what device creation costs.
+              SC="$RT/Contents/Resources/SampleContent"
+              echo "=== SampleContent size ==="
+              du -sh "$SC" 2>/dev/null | tee profile-out/samplecontent-size.txt || echo "(none)"
+              echo "=== SampleContent tree (depth 4) ==="
+              find "$SC" -maxdepth 4 2>/dev/null | sed "s|$SC|<SAMPLE>|" | head -60 \
+                | tee profile-out/samplecontent-tree.txt || true
+              echo "=== plists directly under SampleContent ==="
+              find "$SC" -maxdepth 2 -name "*.plist" 2>/dev/null | head -10 \
+                | tee profile-out/samplecontent-plists.txt || true
+              for p in $(head -3 profile-out/samplecontent-plists.txt 2>/dev/null); do
+                echo "--- $p ---"
+                plutil -convert xml1 -o - "$p" 2>/dev/null | head -40
+              done | tee profile-out/samplecontent-plist-dump.txt || true
 
               # Stage a METADATA-ONLY .simruntime into the app: Info.plist +
               # Resources/profile.plist, but NOT the 16GB RuntimeRoot and not
