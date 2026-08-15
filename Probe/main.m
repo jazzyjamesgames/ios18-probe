@@ -1242,6 +1242,48 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
                                ? [traceSnapshot componentsJoinedByString:@"\n"]
                                : @"(none -- CoreSimulator uses raw stat(), not NSFileManager)"];
         flush();
+
+        // The trace named the one file availability actually wants:
+        //   RuntimeRoot/usr/lib/system/host/liblaunch_sim.dylib
+        // (the AppleInternal miss is just an is-internal-build probe; absence
+        // is normal). Earlier steps put liblaunch_sim.dylib at usr/lib/ --
+        // two directories off, which the generic "corrupt or missing files"
+        // error would never have revealed.
+        //
+        // Placed as an empty file first, on purpose: if availability only
+        // stat()s it, an empty file is enough and proves the check is
+        // existence-only. Tracing stays on so any FURTHER checks past this
+        // one get captured in the same run.
+        [log appendString:@"\n=== step 5: liblaunch_sim.dylib at the traced path ===\n"];
+        [tlock lock];
+        gFileTrace = [NSMutableArray array];
+        [tlock unlock];
+        gOrigFileExists = method_setImplementation(m1, (IMP)probeFileExists);
+        gOrigFileExistsIsDir = method_setImplementation(m2, (IMP)probeFileExistsIsDir);
+        gTracingFiles = YES;
+
+        NSString *step5 = buildAndValidate(5, ^(NSString *rr) {
+          makeSystemVersion(rr);
+          NSString *hostDir = [rr stringByAppendingPathComponent:@"usr/lib/system/host"];
+          [fm createDirectoryAtPath:hostDir withIntermediateDirectories:YES
+                         attributes:nil error:nil];
+          [[NSData data] writeToFile:
+              [hostDir stringByAppendingPathComponent:@"liblaunch_sim.dylib"]
+                          atomically:YES];
+        });
+
+        gTracingFiles = NO;
+        method_setImplementation(m1, gOrigFileExists);
+        method_setImplementation(m2, gOrigFileExistsIsDir);
+
+        [tlock lock];
+        NSArray *trace5 = [gFileTrace copy];
+        [tlock unlock];
+        [log appendFormat:@"step 5: %@\n\n%lu filesystem checks:\n%@\n",
+                           step5, (unsigned long)trace5.count,
+                           trace5.count ? [trace5 componentsJoinedByString:@"\n"]
+                                        : @"(none)"];
+        flush();
       }
     }
   }
