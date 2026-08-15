@@ -346,6 +346,44 @@ jobs:
             sudo hdiutil detach "$MNT" 2>&1 | tail -2 || true
           fi
 
+          # What the on-device fetch actually needs: Apple's public index of
+          # downloadable simulator runtimes. This signed plist is what Xcode
+          # itself reads to fetch runtimes; it lists every runtime dmg with a
+          # direct HTTPS URL, version, build and size. Pull it so we have the
+          # real iOS 18 URL rather than guessing a CDN path.
+          echo "=== Apple simulator-runtime download index ==="
+          for URL in \
+            "https://devimages-cdn.apple.com/downloads/xcode/simulators/index2.dvtdownloadableindex" \
+            "https://devimages-cdn.apple.com/downloads/xcode/simulators/index.dvtdownloadableindex"; do
+            echo "--- trying $URL ---"
+            if curl -fsSL "$URL" -o index.plist 2>/dev/null; then
+              echo "fetched $(wc -c < index.plist) bytes"
+              # It's a binary plist wrapping xml; normalise then extract.
+              plutil -convert xml1 -o index.xml index.plist 2>/dev/null || cp index.plist index.xml
+              cp index.xml profile-out/downloadable-index.xml
+              echo "=== iOS runtime entries (name / version / build / URL / size) ==="
+              python3 - <<'PY' | tee profile-out/ios-runtime-urls.txt
+import plistlib
+d = plistlib.load(open("index.plist","rb"))
+downloadables = d.get("downloadables", d if isinstance(d, list) else [])
+if isinstance(d, dict) and "downloadables" in d:
+    downloadables = d["downloadables"]
+for item in downloadables:
+    name = item.get("name","")
+    ident = item.get("identifier","")
+    if "iOS" not in name and "iOS" not in ident:
+        continue
+    src = item.get("source","")
+    ver = item.get("version","")
+    size = item.get("fileSize", item.get("contentSize",""))
+    print(f"{name} | {ident} | ver={ver} | size={size}")
+    print(f"   {src}")
+PY
+              break
+            fi
+          done
+          echo "(if nothing above, the index moved or needs auth -- the 6.8GB dmg is still on this runner regardless)"
+
           ls -la profile-out/
 
       - uses: actions/upload-artifact@v4
