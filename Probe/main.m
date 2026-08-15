@@ -231,6 +231,8 @@ static BOOL probeFileExistsIsDir(id self, SEL _cmd, NSString *path, BOOL *isDir)
 // and abort() follows immediately -- so nothing ever landed. A local file
 // write can't block on anyone else.
 static NSString *gExceptionCrumbPath;
+// Held so the boot step can use the device created a step earlier.
+static id gCreatedDevice;
 
 static void probeWriteExceptionCrumb(NSException *ex) {
   if (!gExceptionCrumbPath) return;
@@ -1491,7 +1493,41 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
         // header with no indication which died. Each sub-step now publishes
         // before it runs, so the last line printed names the culprit without
         // needing a crash report.
+        // Prefer a REAL downloaded runtime over the synthetic one. Everything
+        // up to here has run against a zero-byte liblaunch_sim.dylib, which is
+        // enough to register and report available but obviously cannot boot.
+        // Once the download has placed a genuine RuntimeRoot in Application
+        // Support, register that instead -- same API call, real bits.
+        NSString *appSupport = NSSearchPathForDirectoriesInDomains(
+                                   NSApplicationSupportDirectory, NSUserDomainMask, YES)
+                                   .firstObject;
+        NSString *downloadedRuntimes =
+            [appSupport stringByAppendingPathComponent:@"SimRuntimes"];
+        NSString *downloadedRoot = [downloadedRuntimes
+            stringByAppendingPathComponent:
+                @"iOS 17.2.simruntime/Contents/Resources/RuntimeRoot"];
+        NSString *realLiblaunch = [downloadedRoot
+            stringByAppendingPathComponent:@"usr/lib/system/host/liblaunch_sim.dylib"];
+
         NSString *step5Dir = [rtBuild stringByAppendingPathComponent:@"step5"];
+        BOOL usingDownloaded = NO;
+        if ([fm fileExistsAtPath:realLiblaunch]) {
+          unsigned long long sz =
+              [[fm attributesOfItemAtPath:realLiblaunch error:NULL] fileSize];
+          NSArray *rootEntries = [fm contentsOfDirectoryAtPath:downloadedRoot error:NULL];
+          [log appendFormat:@"\nDOWNLOADED RUNTIME FOUND -- using it instead of the "
+                             @"synthetic one\n  %@\n  liblaunch_sim.dylib = %llu bytes "
+                             @"(synthetic was 0)\n  RuntimeRoot top level: %@\n",
+                             downloadedRuntimes, sz, rootEntries];
+          step5Dir = downloadedRuntimes;
+          usingDownloaded = YES;
+        } else {
+          [log appendFormat:@"\n(no downloaded runtime yet at %@ -- using the "
+                             @"synthetic one; tap DOWNLOAD REAL RUNTIME to change that)\n",
+                             downloadedRuntimes];
+        }
+        (void)usingDownloaded;
+        flush();
         typedef id (*IdMsg)(id, SEL);
         IdMsg idMsg2 = (IdMsg)objc_msgSend;
 
@@ -1588,6 +1624,7 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
                   deviceSet, @selector(createDeviceWithType:runtime:name:error:),
                   ctxType, ctxRuntime, @"Probe iPhone 14", &devErr);
               outD = [NSString stringWithFormat:@"device=%@\n   error=%@", device, devErr];
+              gCreatedDevice = device;
               if (device) {
                 outD = [outD stringByAppendingFormat:
                     @"\n   *** SIMDEVICE CREATED ***\n   UDID=%@\n   name=%@\n"
@@ -1601,6 +1638,36 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
             }
           });
           [log appendFormat:@"   %@ %@\n", okD ? @"returned" : @"*** TIMED OUT ***", outD];
+
+          // E: boot. Only meaningful with a real RuntimeRoot -- booting means
+          // starting launchd inside the runtime and spawning its daemons, and
+          // there is nothing to start when liblaunch_sim.dylib is a zero-byte
+          // placeholder. Attempted regardless so the failure is recorded
+          // either way, and it's the last step, so a hang costs nothing that
+          // came before it.
+          if (gCreatedDevice) {
+            [log appendFormat:@"\nE. bootWithOptions:error: (90s) -- %@\n",
+                               usingDownloaded ? @"REAL RuntimeRoot"
+                                               : @"synthetic RuntimeRoot, expected to fail"];
+            flush();
+            __block NSString *outE = @"(did not finish)";
+            BOOL okE = probeRunWithTimeout(90.0, ^{
+              @try {
+                NSError *bootErr = nil;
+                BOOL booted = ((BOOL (*)(id, SEL, NSDictionary *, NSError **))objc_msgSend)(
+                    gCreatedDevice, @selector(bootWithOptions:error:), @{}, &bootErr);
+                outE = [NSString stringWithFormat:@"booted=%d error=%@", booted, bootErr];
+                typedef id (*IdMsg2)(id, SEL);
+                IdMsg2 im = (IdMsg2)objc_msgSend;
+                outE = [outE stringByAppendingFormat:@"\n   state now: %@",
+                                                     im(gCreatedDevice, @selector(stateString))];
+              } @catch (NSException *ex) {
+                outE = [NSString stringWithFormat:@"EXCEPTION: %@ -- %@", ex.name, ex.reason];
+              }
+            });
+            [log appendFormat:@"   %@ %@\n",
+                               okE ? @"returned" : @"*** TIMED OUT ***", outE];
+          }
         } else {
           [log appendString:@"   skipped -- a prerequisite above came back nil\n"];
         }
