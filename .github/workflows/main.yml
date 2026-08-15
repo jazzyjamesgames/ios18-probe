@@ -690,6 +690,20 @@ jobs:
           mkdir -p Payload/Probe.app/Frameworks
           cp coresim-stub-out/* Payload/Probe.app/Frameworks/
 
+          # Also ship CoreSimulator as a REAL framework bundle. Boot reached
+          # -[SimDeviceIOServer loadAllBundlesWithError:], which does
+          # [NSBundle bundleWithIdentifier:@"com.apple.CoreSimulator"] to find
+          # its own framework and load the device-IO plugins from it, and
+          # threw "Failed to find bundle with identifier" -- a bare dylib
+          # belongs to no bundle. The Info.plist is a checked-in file, not a
+          # heredoc: heredoc bodies sit at column 0 and terminate the YAML
+          # `run: |` block, which has already corrupted this workflow twice.
+          FW=Payload/Probe.app/Frameworks/CoreSimulator.framework
+          mkdir -p "$FW"
+          cp coresim_patched.dylib "$FW/CoreSimulator"
+          cp coresim-stubs/CoreSimulator-Framework-Info.plist "$FW/Info.plist"
+          find "$FW"
+
           cp -R staged-profiles Payload/Probe.app/RealProfiles
           # Metadata-only runtime bundle, if the mount step produced one.
           if [ -d staged-runtime ]; then

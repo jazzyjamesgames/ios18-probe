@@ -52,6 +52,7 @@ typedef NS_ENUM(NSInteger, TarState) {
 @property(nonatomic, assign) unsigned long long padding;     // bytes to 512 boundary
 @property(nonatomic, copy) NSString *pendingLongName;        // from pax/GNU record
 @property(nonatomic, strong) NSMutableData *pendingLongNameBuf;
+@property(nonatomic, assign) BOOL pendingIsPax;  // distinguishes pax 'x' from GNU 'L'
 @property(nonatomic, assign) NSInteger fileCount;
 @property(nonatomic, copy) NSString *lastError;
 @end
@@ -150,13 +151,16 @@ static unsigned long long tarOctal(const char *field, size_t len) {
       if (type == 'L' || type == 'K') {
         // GNU long name/link: the NEXT entry's path is this record's body.
         self.pendingLongNameBuf = [NSMutableData data];
+        self.pendingIsPax = NO;
         self.state = TarStateSkip;  // captured in the skip branch below
         continue;
       }
       if (type == 'x' || type == 'g') {
-        // pax extended header. Its body holds "len key=value\n" records; the
-        // path record, when present, overrides the next entry's name.
+        // pax extended header. Its body holds "len key=value\n" records, and
+        // ONLY a path= record renames the next entry -- linkpath= and friends
+        // must not be mistaken for one (see the parsing branch below).
         self.pendingLongNameBuf = [NSMutableData data];
+        self.pendingIsPax = YES;
         self.state = TarStateSkip;
         continue;
       }
@@ -248,12 +252,26 @@ static unsigned long long tarOctal(const char *field, size_t len) {
         self.pendingLongNameBuf = nil;
         if (raw.length) {
           NSString *path = nil;
-          // pax record form: "<len> path=<value>\n"
-          NSRange r = [raw rangeOfString:@" path="];
-          if (r.location != NSNotFound) {
-            NSString *rest = [raw substringFromIndex:NSMaxRange(r)];
-            NSRange nl = [rest rangeOfString:@"\n"];
-            path = (nl.location != NSNotFound) ? [rest substringToIndex:nl.location] : rest;
+          if (self.pendingIsPax) {
+            // pax body is a series of "<len> key=value\n" records. ONLY a
+            // path= record renames the next entry.
+            //
+            // The first version fell through to the GNU branch whenever no
+            // " path=" was found, which meant a pax header carrying only
+            // linkpath= (very common -- every symlink with a long target) had
+            // its entire raw body adopted as the next entry's NAME. That's
+            // where the junk "134 linkpath=" entries in RuntimeRoot came from:
+            // roughly twenty top-level symlinks were created under garbage
+            // names instead of as links.
+            for (NSString *record in [raw componentsSeparatedByString:@"\n"]) {
+              NSRange sp = [record rangeOfString:@" "];
+              if (sp.location == NSNotFound) continue;
+              NSString *kv = [record substringFromIndex:NSMaxRange(sp)];
+              if ([kv hasPrefix:@"path="]) {
+                path = [kv substringFromIndex:5];
+                break;
+              }
+            }
           } else {
             // GNU 'L': body is the raw path, NUL-terminated.
             path = [raw stringByTrimmingCharactersInSet:
@@ -262,6 +280,7 @@ static unsigned long long tarOctal(const char *field, size_t len) {
           }
           if (path.length) self.pendingLongName = path;
         }
+        self.pendingIsPax = NO;
       }
       // Padding after these records still has to go.
       if (self.padding) {

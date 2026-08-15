@@ -777,8 +777,32 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
   [log appendString:@"\n=== Now attempting the real, patched CoreSimulator ===\n"];
   flush();
 
-  NSString *coresimPath = [[NSBundle mainBundle] pathForResource:@"coresim_target"
-                                                            ofType:@"dylib"];
+  // Load CoreSimulator from its framework BUNDLE rather than the loose dylib.
+  // Boot reached -[SimDeviceIOServer loadAllBundlesWithError:], which resolves
+  // [NSBundle bundleWithIdentifier:@"com.apple.CoreSimulator"] to locate its
+  // own framework and load device-IO plugins from it, and threw "Failed to
+  // find bundle with identifier" because a bare dylib belongs to no bundle.
+  //
+  // Instantiating the NSBundle is what registers it in Foundation's table, so
+  // bundleWithIdentifier: can find it afterwards -- dlopen alone does not do
+  // that. The loose dylib remains as a fallback in case the framework is
+  // missing from an older build.
+  NSString *frameworkPath = [[[NSBundle mainBundle] bundlePath]
+      stringByAppendingPathComponent:@"Frameworks/CoreSimulator.framework"];
+  NSString *coresimPath = nil;
+  if ([[NSFileManager defaultManager] fileExistsAtPath:frameworkPath]) {
+    NSBundle *csBundle = [NSBundle bundleWithPath:frameworkPath];
+    [log appendFormat:@"CoreSimulator.framework: %@\n  identifier=%@\n",
+                       frameworkPath, csBundle.bundleIdentifier];
+    coresimPath = [frameworkPath stringByAppendingPathComponent:@"CoreSimulator"];
+    NSBundle *found = [NSBundle bundleWithIdentifier:@"com.apple.CoreSimulator"];
+    [log appendFormat:@"  bundleWithIdentifier lookup before load: %@\n",
+                       found ? @"FOUND" : @"not yet (expected until loaded)"];
+  } else {
+    coresimPath = [[NSBundle mainBundle] pathForResource:@"coresim_target"
+                                                  ofType:@"dylib"];
+    [log appendString:@"(no CoreSimulator.framework -- using the loose dylib)\n"];
+  }
   [log appendFormat:@"coresim_target path: %@\n", coresimPath];
   flush();
 
@@ -790,6 +814,11 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
   } else {
     [log appendString:@"dlopen SUCCEEDED -- CoreSimulator's real binary "
                        @"loaded and fully linked on iOS.\n"];
+    // Confirm the identifier resolves NOW that the image is loaded -- this is
+    // the exact lookup loadAllBundlesWithError: performs during boot.
+    NSBundle *idLookup = [NSBundle bundleWithIdentifier:@"com.apple.CoreSimulator"];
+    [log appendFormat:@"bundleWithIdentifier:com.apple.CoreSimulator -> %@\n",
+                       idLookup ? idLookup.bundlePath : @"STILL NOT FOUND"];
     flush();
 
     // Loaded successfully, but nothing has actually been *called* yet.

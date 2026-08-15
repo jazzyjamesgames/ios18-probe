@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Info.plist for the CoreSimulator.framework bundle we assemble around the
+  patched binary.
+
+  Boot reaches -[SimDeviceIOServer loadAllBundlesWithError:], which calls
+  [NSBundle bundleWithIdentifier:@"com.apple.CoreSimulator"] to locate its own
+  framework and load the device-IO plugins from it. A bare dylib belongs to no
+  bundle, so that lookup threw "Failed to find bundle with identifier". This
+  file is what makes it resolve.
+
+  Kept as a checked-in file rather than a heredoc in the workflow: heredoc
+  bodies sit at column 0, which terminates the YAML `run: |` literal block and
+  silently corrupts the whole workflow (it has already cost two builds).
+
+  Version is 993.7 to match +[SimServiceContext serviceVersionString], since
+  CoreSimulator compares its framework version against the service version.
+-->
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>com.apple.CoreSimulator</string>
+	<key>CFBundleExecutable</key>
+	<string>CoreSimulator</string>
+	<key>CFBundleName</key>
+	<string>CoreSimulator</string>
+	<key>CFBundlePackageType</key>
+	<string>FMWK</string>
+	<key>CFBundleShortVersionString</key>
+	<string>993.7</string>
+	<key>CFBundleVersion</key>
+	<string>993.7</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>MinimumOSVersion</key>
+	<string>15.0</string>
+</dict>
+</plist>
