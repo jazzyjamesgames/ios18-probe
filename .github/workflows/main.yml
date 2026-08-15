@@ -78,6 +78,15 @@ jobs:
             coresim_patched.dylib coresim_patched2.dylib
           mv coresim_patched2.dylib coresim_patched.dylib
 
+          # Boot then reached createLaunchdJobWithBinpref:, which insists on a
+          # writable /private/tmp to hold <launchdJobName>/disabled.plist. iOS
+          # has no such directory and the sandbox won't allow creating one, so
+          # the two path literals become relative and the probe chdir()s into
+          # its data container before booting.
+          python3 tools/patch_tmp_path.py \
+            coresim_patched.dylib coresim_patched3.dylib
+          mv coresim_patched3.dylib coresim_patched.dylib
+
       - name: Compile CoreSimulator stub libraries
         run: |
           SDK=$(DEVELOPER_DIR="$IOS18_DEVELOPER_DIR" xcrun --sdk iphoneos --show-sdk-path)

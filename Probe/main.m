@@ -16,6 +16,8 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <objc/objc-exception.h>
+#import <unistd.h>
+#import <sys/syslimits.h>
 #import "RuntimeFetcher.h"
 
 @interface NSExtension : NSObject
@@ -1786,6 +1788,36 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
             } else {
               [log appendString:@"\nSimHostResourceChecker not found (unexpected)\n"];
             }
+
+            // Boot wants a writable /private/tmp:
+            //
+            //   /private/tmp does not exist or is not accessible. Simulators
+            //   will NOT be available until this misconfiguration of your
+            //   system is corrected!
+            //
+            // It creates /private/tmp/<launchdJobName>/ and writes
+            // disabled.plist there. iOS has no /private/tmp and the sandbox
+            // won't allow creating one, so patch_tmp_path.py rewrote those two
+            // literals in the binary to the RELATIVE paths "tmp" and "tmp/%@".
+            // They resolve against the working directory, so pointing it at the
+            // data container turns them into the app's own tmp directory --
+            // and because the kernel resolves relative paths, this works for
+            // direct open()/mkdir() as well as anything via NSFileManager.
+            NSString *containerDir =
+                [NSHomeDirectory() stringByStandardizingPath];
+            NSString *tmpDir = [containerDir stringByAppendingPathComponent:@"tmp"];
+            [[NSFileManager defaultManager] createDirectoryAtPath:tmpDir
+                                     withIntermediateDirectories:YES
+                                                      attributes:nil
+                                                           error:NULL];
+            int chdirRc = chdir(containerDir.fileSystemRepresentation);
+            char cwdBuf[PATH_MAX] = {0};
+            getcwd(cwdBuf, sizeof(cwdBuf));
+            [log appendFormat:@"\nworking directory for the relative tmp path:\n"
+                               "  chdir(%@) -> %d\n  cwd=%s\n  tmp exists=%d\n",
+                               containerDir, chdirRc, cwdBuf,
+                               [[NSFileManager defaultManager]
+                                   fileExistsAtPath:tmpDir]];
 
             [log appendFormat:@"\nE. bootWithOptions:error: (90s) -- %@\n",
                                usingDownloaded ? @"REAL RuntimeRoot"
