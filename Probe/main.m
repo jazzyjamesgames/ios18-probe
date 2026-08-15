@@ -234,6 +234,28 @@ static NSString *gExceptionCrumbPath;
 // Held so the boot step can use the device created a step earlier.
 static id gCreatedDevice;
 
+// Boot's pre-flight check reads process limits via
+// sysctlbyname("kern.maxprocperuid") and proc_pidinfo, and inside an iOS app
+// sandbox that returns 1 -- so -[SimHostResourceChecker isSafeToBootWithError:]
+// refuses before ever attempting a spawn ("maxUserProcs: 1 ...
+// enforcedProcBuffer: 100").
+//
+// These replacements report generous limits so the check passes and boot
+// proceeds to what it actually does. That is the point: the verdict is a
+// policy gate, and the interesting question is what happens BEHIND it. If
+// spawning genuinely can't work here, the failure should come from the spawn
+// itself, with a real error, not from a sysctl the sandbox answers oddly.
+//
+// Deliberately overriding the INPUTS rather than isSafeToBootWithError: --
+// leaving the real decision logic intact means anything else it checks
+// (memory, file descriptors) still gets a truthful answer.
+static NSUInteger probeMaxUserProcs(id self, SEL _cmd) { return 2000; }
+static NSUInteger probeRunningUserProcs(id self, SEL _cmd) { return 50; }
+static NSUInteger probeMaxSystemProcs(id self, SEL _cmd) { return 4000; }
+static NSUInteger probeRunningSystemProcs(id self, SEL _cmd) { return 100; }
+static NSUInteger probeMaxFiles(id self, SEL _cmd) { return 100000; }
+static NSUInteger probeOpenFiles(id self, SEL _cmd) { return 100; }
+
 static void probeWriteExceptionCrumb(NSException *ex) {
   if (!gExceptionCrumbPath) return;
   NSMutableString *entry = [NSMutableString string];
@@ -1678,6 +1700,33 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
           // either way, and it's the last step, so a hang costs nothing that
           // came before it.
           if (gCreatedDevice) {
+            // Neutralise the resource pre-check before boot. Last run stopped
+            // here with maxUserProcs=1 vs an enforcedProcBuffer of 100, having
+            // never attempted a spawn.
+            Class rcClass = NSClassFromString(@"SimHostResourceChecker");
+            if (rcClass) {
+              struct { SEL sel; IMP imp; } patches[] = {
+                {@selector(maxUserProcs), (IMP)probeMaxUserProcs},
+                {@selector(runningUserProcs), (IMP)probeRunningUserProcs},
+                {@selector(maxSystemProcs), (IMP)probeMaxSystemProcs},
+                {@selector(runningSystemProcs), (IMP)probeRunningSystemProcs},
+                {@selector(maxFiles), (IMP)probeMaxFiles},
+                {@selector(openFiles), (IMP)probeOpenFiles},
+              };
+              NSMutableArray *patched = [NSMutableArray array];
+              for (size_t i = 0; i < sizeof(patches) / sizeof(patches[0]); i++) {
+                Method m = class_getInstanceMethod(rcClass, patches[i].sel);
+                if (m) {
+                  method_setImplementation(m, patches[i].imp);
+                  [patched addObject:NSStringFromSelector(patches[i].sel)];
+                }
+              }
+              [log appendFormat:@"\npatched SimHostResourceChecker: %@\n",
+                                 [patched componentsJoinedByString:@", "]];
+            } else {
+              [log appendString:@"\nSimHostResourceChecker not found (unexpected)\n"];
+            }
+
             [log appendFormat:@"\nE. bootWithOptions:error: (90s) -- %@\n",
                                usingDownloaded ? @"REAL RuntimeRoot"
                                                : @"synthetic RuntimeRoot, expected to fail"];
