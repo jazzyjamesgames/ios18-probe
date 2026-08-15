@@ -171,6 +171,62 @@ jobs:
 
           ls -la recon-out/
 
+      - name: Dump real .simdevicetype / .simruntime profiles (ground truth for the schema)
+        run: |
+          # The synthetic profile fed to the on-device context guesses both
+          # the profile.plist keys and the bundle layout. The runner has the
+          # real articles on disk -- read them instead of guessing.
+          mkdir -p profile-out
+
+          echo "=== searching for real .simdevicetype bundles ==="
+          find /Applications/Xcode_16.1.app -name "*.simdevicetype" -maxdepth 12 2>/dev/null | head -20 \
+            > profile-out/devicetype-paths.txt || true
+          find /Library/Developer/CoreSimulator -name "*.simdevicetype" -maxdepth 8 2>/dev/null | head -20 \
+            >> profile-out/devicetype-paths.txt || true
+          cat profile-out/devicetype-paths.txt
+
+          DT=$(head -1 profile-out/devicetype-paths.txt)
+          if [ -n "$DT" ]; then
+            echo "=== exact internal layout of: $DT ==="
+            find "$DT" | sed "s|$DT|<BUNDLE>|" | tee profile-out/devicetype-layout.txt
+
+            echo "=== its Info.plist ==="
+            INFO=$(find "$DT" -name "Info.plist" | head -1)
+            [ -n "$INFO" ] && plutil -convert xml1 -o - "$INFO" | tee profile-out/devicetype-Info.plist
+
+            echo "=== its profile.plist (THE schema we need) ==="
+            PROF=$(find "$DT" -name "profile.plist" | head -1)
+            [ -n "$PROF" ] && plutil -convert xml1 -o - "$PROF" | tee profile-out/devicetype-profile.plist
+          fi
+
+          echo "=== searching for real .simruntime bundles ==="
+          find /Library/Developer/CoreSimulator/Profiles/Runtimes -maxdepth 2 -name "*.simruntime" 2>/dev/null \
+            > profile-out/runtime-paths.txt || true
+          find /Applications/Xcode_16.1.app -name "*.simruntime" -maxdepth 12 2>/dev/null | head -5 \
+            >> profile-out/runtime-paths.txt || true
+          cat profile-out/runtime-paths.txt
+
+          RT=$(head -1 profile-out/runtime-paths.txt)
+          if [ -n "$RT" ]; then
+            echo "=== runtime bundle top-level layout (not recursive -- RuntimeRoot is huge) ==="
+            find "$RT" -maxdepth 3 | sed "s|$RT|<RUNTIME>|" | head -40 | tee profile-out/runtime-layout.txt
+
+            RINFO=$(find "$RT" -maxdepth 3 -name "Info.plist" | head -1)
+            [ -n "$RINFO" ] && plutil -convert xml1 -o - "$RINFO" | tee profile-out/runtime-Info.plist
+
+            RPROF=$(find "$RT" -maxdepth 4 -name "profile.plist" | head -1)
+            [ -n "$RPROF" ] && plutil -convert xml1 -o - "$RPROF" | tee profile-out/runtime-profile.plist
+          fi
+
+          ls -la profile-out/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: real-profiles
+          path: profile-out
+          if-no-files-found: warn
+          retention-days: 14
+
       - uses: actions/upload-artifact@v4
         with:
           name: symbol-recon
