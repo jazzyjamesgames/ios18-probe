@@ -172,10 +172,21 @@
 // assertion aborted the process uncatchably -- which is as far as device
 // creation got. Real implementation: create the destination's parent chain,
 // clear any stale destination, then copy.
+// Implemented as a batch from the full sim_ selector list dumped out of both
+// binaries, rather than one per device round trip. Device creation was
+// discovering these one at a time -- each costing a build, an install and a
+// crash -- because an unimplemented sim_ selector gets stubbed to nil, which
+// reads as "failed but set no error", and CoreSimulator asserts on exactly
+// that inconsistency.
 @interface NSFileManager (CoreSimulatorUtilities)
 - (BOOL)sim_copyItemAtPath:(NSString *)srcPath
              toCreatedPath:(NSString *)dstPath
                      error:(NSError **)error;
+- (BOOL)sim_reentrantSafeCreateDirectoryAtPath:(NSString *)path
+                   withIntermediateDirectories:(BOOL)intermediates
+                                    attributes:(NSDictionary *)attributes
+                                         error:(NSError **)error;
+- (BOOL)sim_backgroundDeleteItemAtPath:(NSString *)path error:(NSError **)error;
 @end
 
 @implementation NSFileManager (CoreSimulatorUtilities)
@@ -202,6 +213,118 @@
   // leftover -- copyItemAtPath: fails outright if the destination exists.
   [self removeItemAtPath:dstPath error:NULL];
   return [self copyItemAtPath:srcPath toPath:dstPath error:error];
+}
+
+// THE blocker for device creation. CoreSimulator builds the new device's
+// tree (DeviceSet/<UDID>/data/Library/Caches and friends) through this, and
+// asserts "Expected error on dirs sim_reentrantSafeCreateDirectoryAtPath
+// failure" when it returns NO without populating the error -- which is
+// exactly what a nil-returning stub does.
+//
+// "reentrantSafe" means tolerating a racing creator: createDirectoryAtPath:
+// with intermediates already succeeds if the directory exists, but an
+// EEXIST from a concurrent creator is also success here, not failure.
+- (BOOL)sim_reentrantSafeCreateDirectoryAtPath:(NSString *)path
+                   withIntermediateDirectories:(BOOL)intermediates
+                                    attributes:(NSDictionary *)attributes
+                                         error:(NSError **)error {
+  if (!path.length) {
+    if (error) {
+      *error = [NSError errorWithDomain:NSPOSIXErrorDomain
+                                   code:EINVAL
+                               userInfo:@{
+                                 NSLocalizedDescriptionKey :
+                                     @"sim_reentrantSafeCreateDirectoryAtPath: empty path"
+                               }];
+    }
+    return NO;
+  }
+
+  NSError *localError = nil;
+  if ([self createDirectoryAtPath:path
+      withIntermediateDirectories:intermediates
+                       attributes:attributes
+                            error:&localError]) {
+    return YES;
+  }
+
+  // Someone else created it first, or it was already there: success.
+  BOOL isDir = NO;
+  if ([self fileExistsAtPath:path isDirectory:&isDir] && isDir) {
+    return YES;
+  }
+
+  if (error) {
+    *error = localError
+                 ?: [NSError errorWithDomain:NSPOSIXErrorDomain
+                                        code:EIO
+                                    userInfo:@{
+                                      NSLocalizedDescriptionKey :
+                                          @"sim_reentrantSafeCreateDirectoryAtPath failed"
+                                    }];
+  }
+  return NO;
+}
+
+- (BOOL)sim_backgroundDeleteItemAtPath:(NSString *)path error:(NSError **)error {
+  if (![self fileExistsAtPath:path]) return YES;  // already gone
+  return [self removeItemAtPath:path error:error];
+}
+@end
+
+// Path/string helpers from the same list, on their most probable classes.
+@interface NSString (CoreSimulatorUtilitiesPaths)
+- (BOOL)sim_IsSubpathOf:(NSString *)parent;
+- (NSString *)sim_realPathCaseSensitive;
+@end
+
+@implementation NSString (CoreSimulatorUtilitiesPaths)
+- (BOOL)sim_IsSubpathOf:(NSString *)parent {
+  if (!parent.length) return NO;
+  NSString *a = [self stringByStandardizingPath];
+  NSString *b = [parent stringByStandardizingPath];
+  if ([a isEqualToString:b]) return YES;
+  if (![b hasSuffix:@"/"]) b = [b stringByAppendingString:@"/"];
+  return [a hasPrefix:b];
+}
+
+// Same resolution as sim_realPath; the "case sensitive" variant matters on
+// case-sensitive volumes, and returning the resolved path is correct on both.
+- (NSString *)sim_realPathCaseSensitive {
+  char resolved[PATH_MAX];
+  if (realpath([self fileSystemRepresentation], resolved) != NULL) {
+    return [NSString stringWithUTF8String:resolved];
+  }
+  return nil;
+}
+@end
+
+@interface NSDictionary (CoreSimulatorUtilities)
+- (NSDictionary *)sim_dictionaryByAddingValue:(id)value forKey:(id)key;
+- (BOOL)sim_writeAtomicallyToFile:(NSString *)path error:(NSError **)error;
+@end
+
+@implementation NSDictionary (CoreSimulatorUtilities)
+- (NSDictionary *)sim_dictionaryByAddingValue:(id)value forKey:(id)key {
+  if (!key) return self;
+  NSMutableDictionary *copy = [self mutableCopy];
+  copy[key] = value;
+  return copy;
+}
+
+- (BOOL)sim_writeAtomicallyToFile:(NSString *)path error:(NSError **)error {
+  NSError *localError = nil;
+  NSData *data = [NSPropertyListSerialization dataWithPropertyList:self
+                                                            format:NSPropertyListBinaryFormat_v1_0
+                                                           options:0
+                                                             error:&localError];
+  if (!data) {
+    if (error) *error = localError;
+    return NO;
+  }
+  return [data writeToFile:path
+                   options:NSDataWritingAtomic
+                     error:error];
 }
 @end
 
