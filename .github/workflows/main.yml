@@ -769,16 +769,30 @@ jobs:
             fi
           done
 
-          # Also expose them under Resources/. NSBundle's resource lookup for a
-          # FLAT framework treats bundlePath as the resource root, but for the
-          # macOS layout it's Versions/A/Resources -- and the real framework
-          # uses the latter. Hardlinking (falling back to copy) into
-          # Resources/ covers both interpretations without doubling the size.
-          mkdir -p "$FW/Resources"
-          for dio in "$FW"/*.simdeviceio; do
-            [ -d "$dio" ] || continue
-            cp -Rl "$dio" "$FW/Resources/" 2>/dev/null || cp -R "$dio" "$FW/Resources/"
-          done
+          # DO NOT create Resources/ or Versions/ in here. Mirroring the
+          # plugins into $FW/Resources/ was tried and it broke installation of
+          # the entire app:
+          #
+          #   Info.plist from bundle at path .../CoreSimulator.framework had
+          #   none of the keys that we expect
+          #
+          # The Info.plist was fine -- byte-identical to builds that installed.
+          # The directory is what did it. CFBundle infers a bundle's LAYOUT
+          # from which subdirectories exist: a "Contents" dir means the macOS
+          # layout, a "Resources" dir means the old version-1 layout, and
+          # neither means the flat iOS layout. Creating Resources/ flipped this
+          # framework to version 1, so CFBundle went looking for the Info.plist
+          # at Resources/Info.plist, found nothing, and installd reported an
+          # empty key set. The keyCount in that message comes from installd
+          # separately stat-ing the flat path for the diagnostic, which is why
+          # adding keys changed the count from 8 to 15 and changed nothing else.
+          #
+          # Keep this framework flat: Info.plist and the plugins side by side
+          # at the top level, next to the binary.
+          if [ -e "$FW/Resources" ] || [ -e "$FW/Versions" ] || [ -e "$FW/Contents" ]; then
+            echo "FATAL: $FW has a layout subdirectory; this will not install." >&2
+            exit 1
+          fi
 
           du -sh "$FW"
           find "$FW" -maxdepth 2
