@@ -253,6 +253,34 @@ jobs:
             done
           fi
 
+          # Device types are now registering on-device, so the runtime is the
+          # whole remaining question -- and it's the half that carries iOS 18
+          # itself. Settle definitively whether this runner has ANY usable
+          # runtime material, since images.plist lists runtimes whose volume
+          # paths don't exist and the Cryptex scan found no dmg with UIKit.
+          echo "=== anything .simruntime anywhere plausible ==="
+          for root in /Library/Developer/CoreSimulator \
+                      /Applications/Xcode_16.1.app/Contents/Developer/Platforms/iPhoneOS.platform \
+                      "$HOME/Library/Developer/CoreSimulator"; do
+            echo "--- $root ---"
+            find "$root" -maxdepth 8 -name "*.simruntime" 2>/dev/null | head -10
+          done > profile-out/runtime-search.txt 2>&1
+          cat profile-out/runtime-search.txt
+
+          echo "=== any RuntimeRoot directory ==="
+          find /Library/Developer /Applications/Xcode_16.1.app -maxdepth 10 -type d -name "RuntimeRoot" 2>/dev/null \
+            | head -5 | tee profile-out/runtimeroot-search.txt
+
+          echo "=== any runtime-sized dmg (these would BE the runtimes) ==="
+          find /Library/Developer /Applications/Xcode_16.1.app -maxdepth 10 -name "*.dmg" -size +200M 2>/dev/null \
+            | head -10 | tee profile-out/runtime-dmg-search.txt
+
+          echo "=== what the platform actually ships ==="
+          ls -la /Applications/Xcode_16.1.app/Contents/Developer/Platforms/iPhoneOS.platform/Library/Developer/CoreSimulator/ 2>&1 \
+            | tee profile-out/platform-coresimulator-dir.txt
+          ls -la /Library/Developer/CoreSimulator/Profiles/Runtimes/ 2>&1 \
+            | tee -a profile-out/platform-coresimulator-dir.txt
+
           ls -la profile-out/
 
       - uses: actions/upload-artifact@v4
