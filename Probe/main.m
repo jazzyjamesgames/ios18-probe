@@ -624,6 +624,7 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
       [log appendString:@"\n=== Trying non-daemon connection paths ===\n"];
       flush();
 
+      __block id liveContext = nil;
       typedef id (*ConnTypeMsg)(Class, SEL, NSString *, NSUInteger, NSError **);
       ConnTypeMsg connMsg = (ConnTypeMsg)objc_msgSend;
       for (NSUInteger connectionType = 0; connectionType <= 3; connectionType++) {
@@ -637,6 +638,7 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
                            developerDir, connectionType, &connError);
           [log appendFormat:@"  result: %@\n  error: %@\n", ctx, connError];
           if (ctx) {
+            if (!liveContext) liveContext = ctx;
             // A live context means the daemon was bypassed. Ask it something
             // that requires real internal state, not just a non-nil pointer.
             typedef id (*IdMsg)(id, SEL);
@@ -668,6 +670,93 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
         [log appendFormat:@"  EXCEPTION: %@ -- %@\n", ex.name, ex.reason];
       }
       flush();
+
+      // A live context reports supportedDeviceTypes/supportedRuntimes as
+      // empty ARRAYS (not nil, not an error) because the developer dir we
+      // handed it is empty -- it has nowhere to find profiles. The context
+      // exposes methods to be fed some:
+      //   - supportedDeviceTypesAddProfilesAtPath:
+      //   - supportedRuntimesAddProfilesAtPath:createDefaultDevicesIfNeeded:
+      // so build a .simdevicetype bundle and hand it over.
+      //
+      // Neither the profile.plist schema nor the expected bundle layout is
+      // documented. The keys below are the ones real .simdevicetype profiles
+      // carry; the layout is genuinely uncertain, since CoreSimulator is
+      // macOS code (Contents/Resources/...) running on iOS, where bundles are
+      // normally flat. Rather than pick one, build both and see which the
+      // framework accepts -- non-empty supportedDeviceTypes is the answer.
+      if (liveContext) {
+        [log appendString:@"\n=== Feeding it a synthetic device-type profile ===\n"];
+        flush();
+
+        NSDictionary *profile = @{
+          @"name" : @"Probe Test Device",
+          @"identifier" : @"com.apple.CoreSimulator.SimDeviceType.Probe-Test-Device",
+          @"modelIdentifier" : @"iPhone14,7",
+          @"productFamilyId" : @1,
+          @"supportedProductFamilyIds" : @[ @1 ],
+          @"supportedArchs" : @[ @"arm64" ],
+          @"mainScreenSize" : @{@"width" : @1170, @"height" : @2532},
+          @"mainScreenScale" : @3.0,
+          @"mainScreenDpi" : @460,
+          @"minRuntimeVersion" : @0,
+          @"maxRuntimeVersion" : @999999999,
+        };
+        NSDictionary *infoPlist = @{
+          @"CFBundleIdentifier" : @"com.apple.CoreSimulator.SimDeviceType.Probe-Test-Device",
+          @"CFBundleName" : @"Probe Test Device",
+          @"CFBundlePackageType" : @"BNDL",
+          @"CFBundleShortVersionString" : @"1.0",
+          @"CFBundleVersion" : @"1",
+        };
+
+        NSFileManager *fm = [NSFileManager defaultManager];
+        for (NSString *layout in @[ @"macOS-style", @"flat" ]) {
+          BOOL macStyle = [layout isEqualToString:@"macOS-style"];
+          NSString *root = [docs stringByAppendingPathComponent:
+                                     [NSString stringWithFormat:@"Profiles-%@", layout]];
+          NSString *deviceTypesDir = [root stringByAppendingPathComponent:@"DeviceTypes"];
+          NSString *bundle = [deviceTypesDir
+              stringByAppendingPathComponent:@"ProbeTestDevice.simdevicetype"];
+          NSString *infoDir = macStyle ? [bundle stringByAppendingPathComponent:@"Contents"]
+                                       : bundle;
+          NSString *resourcesDir =
+              macStyle ? [infoDir stringByAppendingPathComponent:@"Resources"] : bundle;
+
+          [fm removeItemAtPath:root error:nil];
+          [fm createDirectoryAtPath:resourcesDir
+              withIntermediateDirectories:YES
+                               attributes:nil
+                                    error:nil];
+          BOOL wroteInfo = [infoPlist writeToFile:[infoDir stringByAppendingPathComponent:@"Info.plist"]
+                                       atomically:YES];
+          BOOL wroteProfile =
+              [profile writeToFile:[resourcesDir stringByAppendingPathComponent:@"profile.plist"]
+                        atomically:YES];
+
+          [log appendFormat:@"\n[%@] bundle=%@\n  wroteInfo=%d wroteProfile=%d\n",
+                             layout, bundle, wroteInfo, wroteProfile];
+          flush();
+
+          @try {
+            typedef id (*PathMsg)(id, SEL, NSString *);
+            PathMsg pathMsg = (PathMsg)objc_msgSend;
+            pathMsg(liveContext, @selector(supportedDeviceTypesAddProfilesAtPath:),
+                    deviceTypesDir);
+
+            typedef id (*IdMsg)(id, SEL);
+            IdMsg idMsg = (IdMsg)objc_msgSend;
+            id types = idMsg(liveContext, @selector(supportedDeviceTypes));
+            [log appendFormat:@"  supportedDeviceTypes now: %@\n", types];
+            if ([types respondsToSelector:@selector(count)] && [types count] > 0) {
+              [log appendFormat:@"  *** DEVICE TYPE REGISTERED (%@ layout) ***\n", layout];
+            }
+          } @catch (NSException *ex) {
+            [log appendFormat:@"  EXCEPTION: %@ -- %@\n", ex.name, ex.reason];
+          }
+          flush();
+        }
+      }
     }
   }
 
