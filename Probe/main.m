@@ -18,6 +18,7 @@
 #import <objc/objc-exception.h>
 #import <unistd.h>
 #import <sys/syslimits.h>
+#import <sys/mman.h>
 #import "RuntimeFetcher.h"
 
 @interface NSExtension : NSObject
@@ -406,6 +407,104 @@ static NSString *probeInstallBootTracing(void) {
                                         ? [@"; NOT FOUND: " stringByAppendingString:
                                               [missing componentsJoinedByString:@", "]]
                                         : @""];
+}
+
+// --- can launchd_sim's code be loaded at all? -------------------------------
+//
+// posix_spawn of the binaries the launchd job names returns EPERM, measured on
+// device against the real files. So a separate process can only be one of our
+// own app extensions, and launchd_sim would have to be LOADED into it rather
+// than exec'd -- which is what LiveContainer does for iOS apps: flip
+// MH_EXECUTE to MH_DYLIB and dlopen the result.
+//
+// Two things have to be true for that to be possible, and neither has been
+// tested here. This measures both.
+//
+//   1. Unsigned code execution (JIT). A file in the data container carries no
+//      signature dyld will accept, unless the process is CS_DEBUGGED -- what
+//      SideStore's JIT does. csops reports that directly.
+//   2. dlopen accepting the converted binary at all.
+//
+// The RWX page is deliberately NOT executed unless CS_DEBUGGED is set: jumping
+// to unsigned pages without it is a hard kill, which would take the run down
+// with it and teach nothing that the flag doesn't already say.
+extern int csops(pid_t pid, unsigned int ops, void *useraddr, size_t usersize);
+#define PROBE_CS_OPS_STATUS 0
+#define PROBE_CS_DEBUGGED 0x10000000
+#define PROBE_CS_VALID 0x00000001
+#define PROBE_CS_GET_TASK_ALLOW 0x00000004
+
+static void probeTestCodeLoading(NSMutableString *log, NSString *runtimeRoot) {
+  [log appendString:@"\n=== F. Can launchd_sim's code be loaded into a process? ===\n"];
+
+  uint32_t flags = 0;
+  int rc = csops(getpid(), PROBE_CS_OPS_STATUS, &flags, sizeof(flags));
+  BOOL debugged = (flags & PROBE_CS_DEBUGGED) != 0;
+  [log appendFormat:@"csops -> rc=%d flags=0x%08x  (CS_VALID=%d CS_DEBUGGED=%d "
+                     "CS_GET_TASK_ALLOW=%d)\n",
+                    rc, flags, (flags & PROBE_CS_VALID) != 0, debugged,
+                    (flags & PROBE_CS_GET_TASK_ALLOW) != 0];
+  [log appendFormat:@"  JIT / unsigned code execution: %@\n",
+                    debugged ? @"AVAILABLE (CS_DEBUGGED is set)"
+                             : @"NOT available -- launch via SideStore with JIT "
+                                "enabled to change this"];
+
+  // Whether the kernel will even hand out an executable mapping.
+  void *page = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                    MAP_ANON | MAP_PRIVATE, -1, 0);
+  if (page != MAP_FAILED) {
+    uint32_t code[] = { 0xd2800540, 0xd65f03c0 };  // mov x0, #42 ; ret
+    memcpy(page, code, sizeof(code));
+    int mp = mprotect(page, 4096, PROT_READ | PROT_EXEC);
+    [log appendFormat:@"  mprotect(R|X) -> %d%s\n", mp,
+                      mp == 0 ? "" : " (errno above)"];
+    if (mp == 0 && debugged) {
+      int (*fn)(void) = (int (*)(void))page;
+      [log appendFormat:@"  executed it -> %d (expected 42)\n", fn()];
+    } else if (mp == 0) {
+      [log appendString:@"  not executing it: without CS_DEBUGGED that is a "
+                         "hard kill, and the flag already answers the question\n"];
+    }
+    munmap(page, 4096);
+  }
+
+  // Now the real subject: launchd_sim itself.
+  NSString *src = [runtimeRoot stringByAppendingPathComponent:@"sbin/launchd_sim"];
+  NSFileManager *fm = [NSFileManager defaultManager];
+  if (![fm fileExistsAtPath:src]) {
+    [log appendFormat:@"launchd_sim not found at %@\n", src];
+    return;
+  }
+
+  NSMutableData *bin = [NSMutableData dataWithContentsOfFile:src];
+  [log appendFormat:@"launchd_sim: %lu bytes\n", (unsigned long)bin.length];
+  if (bin.length < 32) return;
+
+  uint32_t *hdr = (uint32_t *)bin.mutableBytes;
+  [log appendFormat:@"  magic=0x%08x filetype=%u (2=MH_EXECUTE 6=MH_DYLIB)\n",
+                    hdr[0], hdr[3]];
+
+  // Flip MH_EXECUTE -> MH_DYLIB so dlopen will consider it at all, and record
+  // the platform, since a simulator binary is built for platform 7 (iOS
+  // Simulator) rather than 2 (iOS) and dyld checks that separately.
+  if (hdr[3] == 2) {
+    hdr[3] = 6;
+    [log appendString:@"  patched filetype MH_EXECUTE -> MH_DYLIB\n"];
+  }
+
+  NSString *dst = [NSHomeDirectory()
+      stringByAppendingPathComponent:@"Documents/launchd_sim_as_dylib.dylib"];
+  [fm removeItemAtPath:dst error:NULL];
+  BOOL wrote = [bin writeToFile:dst atomically:YES];
+  [log appendFormat:@"  wrote converted copy: %d -> %@\n", wrote, dst];
+  if (!wrote) return;
+
+  dlerror();
+  void *h = dlopen(dst.fileSystemRepresentation, RTLD_NOW | RTLD_LOCAL);
+  const char *err = dlerror();
+  [log appendFormat:@"  dlopen -> %s\n", h ? "SUCCESS" : "failed"];
+  [log appendFormat:@"  dlerror: %s\n", err ?: "(none)"];
+  if (h) dlclose(h);
 }
 
 // libobjc's hook, not Foundation's. The assertion is thrown on
@@ -2004,6 +2103,14 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
                            traceD.count ? [traceD componentsJoinedByString:@"\n"]
                                         : @"(none)"];
         flush();
+
+        // With posix_spawn measured as EPERM, loading the code is the only
+        // remaining route to a launchd_sim. Test it directly against the real
+        // binary rather than reasoning about what iOS permits.
+        if (usingDownloaded) {
+          probeTestCodeLoading(log, downloadedRoot);
+          flush();
+        }
       }
     }
   }
