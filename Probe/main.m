@@ -82,13 +82,30 @@ static NSString *gLogPath;
 static UITextView *gTextView;
 static NSString *gLastPublished;
 
+// Guards the missing-selector list, which the process-wide selector hooks
+// touch from whatever thread hits an unresolved selector.
+static NSLock *probeLock(void) {
+  static NSLock *lock;
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{ lock = [NSLock new]; });
+  return lock;
+}
+
+// Called only from the probe thread, which is the sole owner of gLog. The
+// missing-selector list is shared with the hooks, so it's snapshotted under
+// the lock rather than read live.
 static void probePublish(void) {
+  NSLock *lock = probeLock();
+  [lock lock];
+  NSArray *missingSnapshot = [gMissingSelectors copy];
+  [lock unlock];
+
   NSMutableString *out = [NSMutableString string];
   if (gLog) [out appendString:gLog];
-  if (gMissingSelectors.count) {
+  if (missingSnapshot.count) {
     [out appendFormat:@"\n\n--- missing selectors seen so far (%lu) ---\n%@\n",
-                      (unsigned long)gMissingSelectors.count,
-                      [gMissingSelectors componentsJoinedByString:@"\n"]];
+                      (unsigned long)missingSnapshot.count,
+                      [missingSnapshot componentsJoinedByString:@"\n"]];
   }
   if (gLogPath) {
     [out writeToFile:gLogPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
@@ -145,16 +162,23 @@ static BOOL probeLooksLikeCoreSimulator(NSString *name) {
          [name containsString:@"simulator"];
 }
 
+// The selector hooks are installed process-wide, so this runs on WHATEVER
+// thread happens to hit an unresolved selector -- and once the probe moved
+// off the main thread, CoreSimulator's own queues made that genuinely
+// concurrent. The previous version mutated a shared NSMutableArray and
+// (via probePublish) read the shared log string with no synchronization at
+// all, which is what crashed the run right after the hooks went in.
 static void probeRecordMissing(NSString *description) {
-  if ([gMissingSelectors containsObject:description]) return;
-  [gMissingSelectors addObject:description];
-  [[gMissingSelectors componentsJoinedByString:@"\n"]
-      writeToFile:gMissingSelectorsPath
-       atomically:YES
-         encoding:NSUTF8StringEncoding
-            error:nil];
-  probePublish();
-  NSLog(@"[PROBE] missing selector: %@", description);
+  NSLock *lock = probeLock();
+  [lock lock];
+  BOOL isNew = ![gMissingSelectors containsObject:description];
+  if (isNew) [gMissingSelectors addObject:description];
+  [lock unlock];
+  // Deliberately does NOT publish. Publishing reads gLog, which belongs to
+  // the probe thread; touching it from arbitrary threads is exactly the race
+  // being fixed. flush() runs often enough on the probe thread that findings
+  // still reach the clipboard promptly.
+  if (isNew) NSLog(@"[PROBE] missing selector: %@", description);
 }
 
 static BOOL probeResolveInstanceMethod(id self, SEL _cmd, SEL sel) {
