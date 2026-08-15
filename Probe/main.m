@@ -11,6 +11,7 @@
 // adapted directly from LiveContainer's own FoundationPrivate.h, which is
 // how their shipping code uses it too.
 #import <UIKit/UIKit.h>
+#import <QuartzCore/QuartzCore.h>
 #import <dlfcn.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
@@ -81,6 +82,13 @@ static BOOL probeResolveInstanceMethod(id self, SEL _cmd, SEL sel) {
 
 @interface AppDelegate : UIResponder <UIApplicationDelegate>
 @property(strong, nonatomic) UIWindow *window;
+// The app's Documents folder has never actually been reachable through the
+// Files app on this install (UIFileSharingEnabled doesn't survive however
+// SideStore resigns this), so writing probe.log to disk, while still useful
+// as a crash-survival record, is NOT a way to read results back. The
+// pasteboard is: it needs no entitlement, no file browser, and no
+// successful app launch beyond this point.
+@property(strong, nonatomic) NSString *logText;
 @end
 
 @implementation AppDelegate
@@ -91,12 +99,29 @@ static BOOL probeResolveInstanceMethod(id self, SEL _cmd, SEL sel) {
   UIViewController *vc = [[UIViewController alloc] init];
   vc.view.backgroundColor = [UIColor whiteColor];
 
-  UITextView *tv = [[UITextView alloc] initWithFrame:vc.view.bounds];
+  CGRect bounds = vc.view.bounds;
+  CGRect textFrame = CGRectMake(0, 0, bounds.size.width, bounds.size.height - 90);
+  UITextView *tv = [[UITextView alloc] initWithFrame:textFrame];
   tv.autoresizingMask =
       UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
   tv.editable = NO;
   tv.font = [UIFont monospacedSystemFontOfSize:13 weight:UIFontWeightRegular];
   [vc.view addSubview:tv];
+
+  UIButton *copyButton = [UIButton buttonWithType:UIButtonTypeSystem];
+  copyButton.frame =
+      CGRectMake(20, bounds.size.height - 80, bounds.size.width - 40, 60);
+  copyButton.autoresizingMask =
+      UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleTopMargin;
+  copyButton.backgroundColor = [UIColor systemBlueColor];
+  copyButton.tintColor = [UIColor whiteColor];
+  copyButton.titleLabel.font = [UIFont boldSystemFontOfSize:20];
+  copyButton.layer.cornerRadius = 12;
+  [copyButton setTitle:@"COPY LOG TO CLIPBOARD" forState:UIControlStateNormal];
+  [copyButton addTarget:self
+                 action:@selector(copyLogTapped:)
+       forControlEvents:UIControlEventTouchUpInside];
+  [vc.view addSubview:copyButton];
 
   self.window.rootViewController = vc;
   [self.window makeKeyAndVisible];
@@ -461,7 +486,18 @@ static BOOL probeResolveInstanceMethod(id self, SEL _cmd, SEL sel) {
   tv.text = log;
   NSLog(@"[PROBE]\n%@", log);
 
+  // Copied automatically as well as on the button, so that even if something
+  // later in launch kills the process, the results are already sitting on
+  // the clipboard ready to paste.
+  self.logText = [log copy];
+  [UIPasteboard generalPasteboard].string = self.logText;
+
   return YES;
+}
+
+- (void)copyLogTapped:(UIButton *)sender {
+  [UIPasteboard generalPasteboard].string = self.logText ?: @"(no log captured)";
+  [sender setTitle:@"COPIED -- now paste it" forState:UIControlStateNormal];
 }
 
 @end
