@@ -323,6 +323,29 @@ jobs:
             fi
           done
 
+          # Boot now fails at "Failed to retrieve paths for simdeviceio
+          # bundles" -- it found our framework via bundleWithIdentifier: and
+          # is looking INSIDE it for the device-IO plugins, which our
+          # hand-assembled framework doesn't contain. Find out what they are,
+          # where they live, and how big.
+          CSFW=/Library/Developer/PrivateFrameworks/CoreSimulator.framework
+          echo "=== simdeviceio bundles in the real framework ==="
+          find "$CSFW" -iname "*simdeviceio*" -maxdepth 8 2>/dev/null | head -30 \
+            | tee profile-out/simdeviceio-paths.txt || echo "(none)"
+
+          echo "=== their total size ==="
+          DIO_DIR=$(dirname "$(head -1 profile-out/simdeviceio-paths.txt)" 2>/dev/null)
+          [ -n "$DIO_DIR" ] && du -sh "$DIO_DIR" 2>/dev/null || true
+
+          echo "=== full framework layout (2 levels) ==="
+          find "$CSFW" -maxdepth 3 2>/dev/null | sed "s|$CSFW|<FW>|" | head -40 \
+            | tee profile-out/coresim-framework-layout.txt || true
+
+          echo "=== how the paths are computed ==="
+          strings -a coresim_thin.bin 2>/dev/null \
+            | grep -iE "simdeviceio|SimDeviceIO.*bundle|\.simdeviceio" | sort -u | head -20 \
+            | tee profile-out/simdeviceio-strings.txt || true
+
           echo "=== all sim_ selectors in CoreSimulator + CoreSimulatorUtilities ==="
           { strings -a coresim_thin.bin 2>/dev/null; strings -a csu_thin.bin 2>/dev/null; } \
             | grep -oE "sim_[A-Za-z0-9_:]+" | sort -u \
