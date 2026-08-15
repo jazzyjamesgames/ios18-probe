@@ -209,30 +209,39 @@ static BOOL probeFileExistsIsDir(id self, SEL _cmd, NSString *path, BOOL *isDir)
 //
 // Publishes SYNCHRONOUSLY: the usual dispatch_async to the main thread would
 // never run, because abort() follows immediately.
-static IMP gOrigAssertHandler;
-
-static void probeAssertHandler(id self, SEL _cmd, NSString *func, NSString *file,
-                                NSInteger line, NSString *desc) {
-  char buf[2048];
+// NSSetUncaughtExceptionHandler rather than swizzling NSAssertionHandler.
+// The swizzle was a bad idea twice over: its fixed-arity replacement stood in
+// for a VARIADIC method (handleFailureInFunction:...description:, ...), and
+// it wrote to UIPasteboard synchronously from a background thread -- the
+// pasteboard lives in another process, so that call can block, and a blocked
+// background thread during abort meant nothing got published at all.
+//
+// This handler is the supported hook for exactly this: an NSAssert raises an
+// NSException, and libobjc runs the uncaught handler before aborting, even on
+// a dispatch queue. It gets the reason AND the call stack.
+//
+// Writes to DISK first (cheap, local, cannot block on another process), and
+// only then attempts the pasteboard -- so a slow pasteboard can't cost us the
+// findings.
+static void probeUncaughtExceptionHandler(NSException *ex) {
+  char buf[4096];
   snprintf(buf, sizeof(buf),
-           "\n\n*** NSASSERT FAILED (captured before abort) ***\n"
-           "  function: %s\n  file: %s\n  line: %ld\n  message: %s\n",
-           func ? [func UTF8String] : "?", file ? [file UTF8String] : "?",
-           (long)line, desc ? [desc UTF8String] : "?");
-  NSString *entry = [NSString stringWithUTF8String:buf] ?: @"(assert, unprintable)";
+           "\n\n*** UNCAUGHT EXCEPTION (captured before abort) ***\n"
+           "  name: %s\n  reason: %s\n",
+           ex.name ? [ex.name UTF8String] : "?",
+           ex.reason ? [ex.reason UTF8String] : "?");
+  NSMutableString *entry = [NSMutableString stringWithUTF8String:buf];
+  for (NSString *frame in ex.callStackSymbols) {
+    [entry appendFormat:@"  %s\n", [frame UTF8String]];
+  }
 
   NSString *combined = [(gLastPublished ?: @"") stringByAppendingString:entry];
   gLastPublished = combined;
   if (gLogPath) {
     [combined writeToFile:gLogPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
   }
+  NSLog(@"[PROBE]%s", buf);
   [UIPasteboard generalPasteboard].string = combined;
-  NSLog(@"[PROBE] %s", buf);
-
-  if (gOrigAssertHandler) {
-    ((void (*)(id, SEL, NSString *, NSString *, NSInteger, NSString *))gOrigAssertHandler)(
-        self, _cmd, func, file, line, desc);
-  }
 }
 
 // Runs work on another queue and gives up waiting after `seconds`. A hang
@@ -442,6 +451,9 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
   // install, and an abort inside a dispatch barrier can end the process at
   // any point without running anything at the end of launch.
   gTextView = tv;
+  // Installed before any probe work so it covers everything, including the
+  // uncatchable assertions CoreSimulator raises on its own dispatch queues.
+  NSSetUncaughtExceptionHandler(&probeUncaughtExceptionHandler);
   void (^flush)(void) = ^{
     probePublish();
   };
@@ -1470,13 +1482,9 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
                            ctxType ? @"yes" : @"nil", ctxRuntime ? @"yes" : @"nil",
                            deviceSet ? @"yes" : @"nil"];
         flush();
-        // Capture the assertion that kills this step, and trace every file it
-        // reads on the way there -- the same two techniques that cracked the
-        // availability check.
-        Method am = class_getInstanceMethod(
-            [NSAssertionHandler class],
-            @selector(handleFailureInFunction:file:lineNumber:description:));
-        if (am) gOrigAssertHandler = method_setImplementation(am, (IMP)probeAssertHandler);
+        // Trace every file this step reads -- the technique that cracked the
+        // availability requirement in one run. (The exception handler that
+        // captures the assertion is installed once at launch, not here.)
         [tlock lock];
         gFileTrace = [NSMutableArray array];
         [tlock unlock];
