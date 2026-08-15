@@ -281,6 +281,67 @@ jobs:
           ls -la /Library/Developer/CoreSimulator/Profiles/Runtimes/ 2>&1 \
             | tee -a profile-out/platform-coresimulator-dir.txt
 
+          # The 200MB+ dmgs in CoreSimulator/Images ARE the runtimes (the
+          # earlier Cryptex scan looked in the wrong directory). images.plist
+          # maps each dmg UUID to its runtimeInfo, so the iOS one is
+          # identifiable. Mount it and take ONLY the metadata plists -- a few
+          # KB. The RuntimeRoot itself is a complete iOS filesystem, far too
+          # large to ship in an IPA, and unusable on-device anyway since
+          # booting it means spawning launchd and dozens of daemons as real
+          # processes. Registering metadata alone is still worth doing: it
+          # makes CoreSimulator state its own reason for calling a runtime
+          # unavailable.
+          python3 tools/dump_images_plist.py > profile-out/images-plist-full.txt 2>&1 || true
+          grep -iE "bundleIdentifier|relative|version|state" profile-out/images-plist-full.txt \
+            | head -60 || true
+
+          IOS_DMG=""
+          for dmg in /Library/Developer/CoreSimulator/Images/*.dmg; do
+            [ -f "$dmg" ] || continue
+            UUID=$(basename "$dmg" .dmg)
+            if grep -q "$UUID" profile-out/images-plist-full.txt 2>/dev/null; then
+              CTX=$(grep -A 12 "$UUID" profile-out/images-plist-full.txt | grep -i "bundleIdentifier" | head -1)
+              echo "$UUID -> $CTX"
+              case "$CTX" in *iOS*) [ -z "$IOS_DMG" ] && IOS_DMG="$dmg";; esac
+            fi
+          done | tee profile-out/dmg-identification.txt
+
+          # Fall back to the largest dmg if identification came up empty --
+          # the iOS runtime is invariably the biggest one present.
+          if [ -z "$IOS_DMG" ]; then
+            IOS_DMG=$(ls -S /Library/Developer/CoreSimulator/Images/*.dmg 2>/dev/null | head -1)
+          fi
+          echo "chosen runtime dmg: $IOS_DMG" | tee -a profile-out/dmg-identification.txt
+          ls -lh "$IOS_DMG" 2>&1 | tee -a profile-out/dmg-identification.txt
+
+          if [ -n "$IOS_DMG" ]; then
+            MNT=/tmp/simrt
+            mkdir -p "$MNT"
+            hdiutil attach "$IOS_DMG" -mountpoint "$MNT" -nobrowse -readonly 2>&1 \
+              | tee profile-out/mount-log.txt || true
+
+            find "$MNT" -maxdepth 6 -name "*.simruntime" 2>/dev/null | head -5 \
+              | tee profile-out/mounted-simruntime-paths.txt
+            RT=$(head -1 profile-out/mounted-simruntime-paths.txt)
+
+            if [ -n "$RT" ]; then
+              echo "=== runtime bundle layout (top levels only) ==="
+              find "$RT" -maxdepth 3 2>/dev/null | sed "s|$RT|<RUNTIME>|" | head -30 \
+                | tee profile-out/runtime-layout.txt
+
+              for f in Contents/Info.plist Contents/Resources/profile.plist Info.plist profile.plist; do
+                if [ -f "$RT/$f" ]; then
+                  OUT="profile-out/runtime-$(basename $f)"
+                  plutil -convert xml1 -o - "$RT/$f" | tee "$OUT"
+                fi
+              done
+
+              echo "=== how big is the RuntimeRoot we are NOT shipping ==="
+              du -sh "$RT" 2>/dev/null | tee profile-out/runtime-size.txt || true
+            fi
+            hdiutil detach "$MNT" 2>&1 | tail -2 || true
+          fi
+
           ls -la profile-out/
 
       - uses: actions/upload-artifact@v4
