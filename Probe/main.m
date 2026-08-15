@@ -158,12 +158,33 @@ static void probePublish(void) {
   });
 }
 
+// Its OWN lock, deliberately not probeLock(). The first version formatted
+// with %@ while holding probeLock, and %@ probes its argument for description
+// selectors -> selector resolution -> probeRecordMissing -> probeLock again.
+// NSLock isn't recursive, so that thread deadlocked while holding the lock,
+// and every later flush() blocked on it forever: output just stopped mid-run
+// with no crash. It survived one earlier run purely because those selectors
+// happened to be resolved and cached already -- a race, not a fix.
+//
+// Now: no %@ anywhere (C formatting, same reasoning as probeDescribeSelector),
+// the string is built BEFORE any lock is taken, and the trace has a separate
+// lock so it can never contend with selector resolution at all.
+static NSLock *probeFileTraceLock(void) {
+  static NSLock *lock;
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{ lock = [NSLock new]; });
+  return lock;
+}
+
 static void probeRecordFileCheck(NSString *path, BOOL existed) {
   if (!gTracingFiles || !path) return;
-  NSLock *lock = probeLock();
+  const char *p = [path UTF8String];
+  char buf[1200];
+  snprintf(buf, sizeof(buf), "%s %s", existed ? "  ok" : "MISS", p ? p : "(null path)");
+  NSString *entry = [NSString stringWithUTF8String:buf] ?: @"(unprintable path)";
+  NSLock *lock = probeFileTraceLock();
   [lock lock];
-  [gFileTrace addObject:[NSString stringWithFormat:@"%@ %@",
-                                                   existed ? @"  ok " : @"MISS", path]];
+  [gFileTrace addObject:entry];
   [lock unlock];
 }
 
@@ -1209,6 +1230,7 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
         // check CoreSimulator makes while deciding availability. Whatever it
         // probes and does NOT find is the actual requirement list.
         [log appendString:@"\n=== Tracing filesystem checks during availability ===\n"];
+        flush();  // publish BEFORE the risky call, so a hang still shows where we were
         gFileTrace = [NSMutableArray array];
         Method m1 = class_getInstanceMethod([NSFileManager class],
                                              @selector(fileExistsAtPath:));
@@ -1232,7 +1254,7 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
         method_setImplementation(m2, gOrigFileExistsIsDir);
 
         [log appendFormat:@"step 4 (traced): %@\n", traced];
-        NSLock *tlock = probeLock();
+        NSLock *tlock = probeFileTraceLock();
         [tlock lock];
         NSArray *traceSnapshot = [gFileTrace copy];
         [tlock unlock];
@@ -1255,6 +1277,7 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
         // existence-only. Tracing stays on so any FURTHER checks past this
         // one get captured in the same run.
         [log appendString:@"\n=== step 5: liblaunch_sim.dylib at the traced path ===\n"];
+        flush();
         [tlock lock];
         gFileTrace = [NSMutableArray array];
         [tlock unlock];
