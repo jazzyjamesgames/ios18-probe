@@ -108,8 +108,10 @@ jobs:
           # Real, correct answers (not placeholders): iOS never has Rosetta.
           CLANG -o coresim-stub-out/libRosetta.dylib coresim-stubs/libRosetta_stub.c
 
-          # Real documented signatures, wave-1 stub bodies.
-          CLANG -framework CoreFoundation -fobjc-arc \
+          # Real documented signatures. SMJobSubmit is the spawn point boot now
+          # reaches; it dumps the launchd job dictionary (via Foundation) and
+          # fails with a real CFError instead of a silent one.
+          CLANG -framework CoreFoundation -framework Foundation -fobjc-arc \
                 -o coresim-stub-out/ServiceManagement coresim-stubs/ServiceManagement_stub.m
 
           # Real public DiskArbitration API, all 16 symbols known from
