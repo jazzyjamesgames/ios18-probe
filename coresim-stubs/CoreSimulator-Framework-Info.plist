@@ -41,7 +41,7 @@
 	     of the keys that we expect ... keyCount=8"
 
 	  An embedded framework needs the platform/build keys below, not just the
-	  generic CFBundle* set. CFBundleSupportedPlatforms is the important one --
+	  generic CFBundle* set. CFBundleSupportedPlatforms is the important one:
 	  without it installd cannot tell this is an iOS framework and refuses the
 	  whole app. The DT* keys are what Xcode stamps into any real framework;
 	  they're cheap to include and make this look like the genuine article to

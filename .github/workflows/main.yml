@@ -726,6 +726,12 @@ jobs:
           cp coresim_patched.dylib "$FW/CoreSimulator"
           cp coresim-stubs/CoreSimulator-Framework-Info.plist "$FW/Info.plist"
 
+          # Fail the build on a malformed plist instead of shipping it. A
+          # literal "--" inside an XML comment is illegal, and it slipped
+          # through once: the build went green, the IPA looked fine, and the
+          # phone rejected the install. Cheap check, expensive to skip.
+          plutil -lint "$FW/Info.plist"
+
           # The six *.simdeviceio plugin bundles (framebuffer, HID, audio,
           # rendering, GPU port vendor, stream processor). Boot now fails at
           # "Failed to retrieve paths for simdeviceio bundles": having found
