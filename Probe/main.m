@@ -1732,7 +1732,7 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
 }
 
 - (void)fetchRuntimeTapped:(UIButton *)sender {
-  [sender setTitle:@"DOWNLOADING..." forState:UIControlStateNormal];
+  [sender setTitle:@"CHECKING..." forState:UIControlStateNormal];
   sender.enabled = NO;
 
   // Application Support, not Documents and not Caches:
@@ -1770,6 +1770,72 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
         [UIPasteboard generalPasteboard].string = snapshot;
       });
     };
+
+    // Refuse to re-download something already here. The fetcher wipes its
+    // destination before the first chunk, so a stray tap would destroy a
+    // completed 15GB extraction and force another 6.9GB transfer. Anything
+    // near the real file count means it's present; a genuinely broken
+    // extraction will be far short of that, and re-running is then correct.
+    NSFileManager *pre = [NSFileManager defaultManager];
+    NSString *existingRoot = [dest stringByAppendingPathComponent:@"RuntimeRoot"];
+    NSString *marker =
+        [existingRoot stringByAppendingPathComponent:
+                          @"usr/lib/system/host/liblaunch_sim.dylib"];
+    unsigned long long markerSize =
+        [[pre attributesOfItemAtPath:marker error:NULL] fileSize];
+    NSArray *existingTop = [pre contentsOfDirectoryAtPath:existingRoot error:NULL];
+
+    if (markerSize > 100000 && existingTop.count >= 5) {
+      [out appendFormat:
+               @"RUNTIME ALREADY PRESENT -- not re-downloading.\n"
+               @"  %@\n  liblaunch_sim.dylib = %llu bytes\n"
+               @"  top level (%lu entries): %@\n\n"
+               @"Delete the app (or the SimRuntimes folder) if you truly want "
+               @"a fresh copy.\n",
+               existingRoot, markerSize, (unsigned long)existingTop.count,
+               [[existingTop sortedArrayUsingSelector:@selector(compare:)]
+                   componentsJoinedByString:@" "]];
+
+      // Re-run the cheap part regardless. RuntimeRoot is the expensive 15GB
+      // piece, but the bundle is useless without its plists, and last run's
+      // assembly step may not have completed. These are kilobytes, so
+      // repeating them costs nothing and guarantees a registrable bundle.
+      NSString *staged = [[[NSBundle mainBundle] bundlePath]
+          stringByAppendingPathComponent:@"RealProfiles/Runtimes/iOS 17.2.simruntime"];
+      NSString *sample = [[[NSBundle mainBundle] bundlePath]
+          stringByAppendingPathComponent:@"RealProfiles/SampleContent"];
+      [pre copyItemAtPath:[staged stringByAppendingPathComponent:@"Contents/Info.plist"]
+                   toPath:[bundleDir stringByAppendingPathComponent:@"Contents/Info.plist"]
+                    error:NULL];
+      [pre copyItemAtPath:[staged stringByAppendingPathComponent:@"Contents/Resources/profile.plist"]
+                   toPath:[dest stringByAppendingPathComponent:@"profile.plist"]
+                    error:NULL];
+      [pre copyItemAtPath:sample
+                   toPath:[dest stringByAppendingPathComponent:@"SampleContent"]
+                    error:NULL];
+
+      [out appendString:@"bundle components:\n"];
+      for (NSString *rel in @[ @"Contents/Info.plist", @"Contents/Resources/profile.plist",
+                               @"Contents/Resources/RuntimeRoot",
+                               @"Contents/Resources/SampleContent" ]) {
+        NSString *full = [bundleDir stringByAppendingPathComponent:rel];
+        [out appendFormat:@"  %@ %@\n",
+                          [pre fileExistsAtPath:full] ? @"ok  " : @"MISS", rel];
+      }
+      [out appendFormat:@"\nregister with:\n  %@\n", runtimesDir];
+      publish();
+      dispatch_async(dispatch_get_main_queue(), ^{
+        [sender setTitle:@"RUNTIME ALREADY INSTALLED" forState:UIControlStateNormal];
+        sender.enabled = YES;
+        self.progressLabel.text = @"runtime present";
+        [self.progressBar setProgress:1.0 animated:NO];
+      });
+      return;
+    }
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+      [sender setTitle:@"DOWNLOADING..." forState:UIControlStateNormal];
+    });
 
     NSError *err = nil;
     BOOL ok = [RuntimeFetcher
