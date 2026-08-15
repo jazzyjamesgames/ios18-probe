@@ -39,6 +39,9 @@
 //      cause would be much harder to see.
 #import <CoreFoundation/CoreFoundation.h>
 #import <Foundation/Foundation.h>
+#import <spawn.h>
+#import <errno.h>
+#import <sys/wait.h>
 
 CFStringRef kSMDomainUserLaunchd = CFSTR("com.apple.launchd.peruser.stub");
 
@@ -53,6 +56,59 @@ static void smAppendToBootTrace(NSString *text) {
   fprintf(f, "%s\n", text.UTF8String ?: "?");
   fflush(f);
   fclose(f);
+}
+
+// Try the spawn the job actually asks for, and report exactly what the kernel
+// says. Whether a sandboxed iOS app can create a process from an arbitrary
+// binary has been an assumption in this project so far; posix_spawn returns an
+// errno, so it can be a measurement instead. CoreSimulator itself imports the
+// whole posix_spawn family, so this is the same mechanism it would use.
+//
+// The Program entry (simulator-trampoline) is a macOS path that does not exist
+// here, but the arguments after it are real files in the downloaded
+// RuntimeRoot, so each candidate is checked for existence first and only the
+// ones present are attempted.
+static void smTrySpawn(NSArray *args, NSMutableString *dump) {
+  NSFileManager *fm = [NSFileManager defaultManager];
+  for (NSUInteger i = 0; i < args.count; i++) {
+    NSString *candidate = args[i];
+    if (![candidate isKindOfClass:[NSString class]] ||
+        ![candidate hasPrefix:@"/"]) {
+      continue;
+    }
+    BOOL exists = [fm fileExistsAtPath:candidate];
+    [dump appendFormat:@"  argv[%lu] exists=%d  %@\n",
+                       (unsigned long)i, exists, candidate];
+    if (!exists) continue;
+
+    // Pass the remaining arguments through, exactly as launchd would.
+    NSArray *rest = [args subarrayWithRange:
+        NSMakeRange(i, args.count - i)];
+    char **argv = calloc(rest.count + 1, sizeof(char *));
+    for (NSUInteger j = 0; j < rest.count; j++) {
+      argv[j] = strdup([rest[j] description].fileSystemRepresentation ?: "");
+    }
+
+    pid_t pid = 0;
+    errno = 0;
+    int rc = posix_spawn(&pid, candidate.fileSystemRepresentation, NULL, NULL,
+                         argv, NULL);
+    int savedErrno = errno;
+    [dump appendFormat:
+        @"    posix_spawn -> rc=%d pid=%d errno=%d (%s)\n",
+        rc, pid, savedErrno, strerror(rc ? rc : savedErrno)];
+
+    if (rc == 0 && pid > 0) {
+      // If it really started, find out whether it stayed alive.
+      int status = 0;
+      pid_t w = waitpid(pid, &status, WNOHANG);
+      [dump appendFormat:
+          @"    *** PROCESS CREATED *** waitpid -> %d status=0x%x\n", w, status];
+    }
+
+    for (NSUInteger j = 0; j < rest.count; j++) free(argv[j]);
+    free(argv);
+  }
 }
 
 Boolean SMJobSubmit(CFStringRef domain, CFDictionaryRef jobDict,
@@ -72,6 +128,18 @@ Boolean SMJobSubmit(CFStringRef domain, CFDictionaryRef jobDict,
       id value = job[key];
       [dump appendFormat:@"  %@ = %@\n", key, value];
     }
+    // Measure the spawn rather than assume it. Program is the macOS
+    // trampoline path; ProgramArguments carries the real launchd_sim chain.
+    [dump appendString:@"\n  --- attempting the spawn this job asks for ---\n"];
+    NSMutableArray *candidates = [NSMutableArray array];
+    id program = job[@"Program"];
+    if ([program isKindOfClass:[NSString class]]) [candidates addObject:program];
+    id programArgs = job[@"ProgramArguments"];
+    if ([programArgs isKindOfClass:[NSArray class]]) {
+      [candidates addObjectsFromArray:programArgs];
+    }
+    smTrySpawn(candidates, dump);
+
     smAppendToBootTrace(dump);
 
     // Also keep it on its own, unabridged: the log is read through a clipboard
@@ -86,9 +154,9 @@ Boolean SMJobSubmit(CFStringRef domain, CFDictionaryRef jobDict,
     if (outError) {
       NSDictionary *info = @{
         (__bridge NSString *)kCFErrorLocalizedDescriptionKey:
-            @"SMJobSubmit is not implemented on iOS: launchd_sim cannot be "
-            @"spawned as a separate process by a sandboxed app. The job "
-            @"dictionary was captured to Documents/launchd-job.txt.",
+            @"SMJobSubmit is not implemented: no launchd on iOS to submit the "
+            @"job to. The job dictionary and the result of attempting the "
+            @"spawn directly were captured to Documents/launchd-job.txt.",
       };
       CFErrorRef err = CFErrorCreate(kCFAllocatorDefault,
                                      CFSTR("com.apple.CoreSimulator.SimError"),
