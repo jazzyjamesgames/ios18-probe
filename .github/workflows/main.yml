@@ -384,15 +384,17 @@ jobs:
           # all -- those live in Info.plist).
           mkdir -p staged-profiles/DeviceTypes
 
-          # Prefer a modern @3x iPhone over whatever sorts first. The previous
-          # run staged an iPhone Xʀ purely because it was head -1 -- that's a
-          # 828x1792 @2x/326ppi panel, nothing like the iPhone 14 (1170x2532
-          # @3x/460ppi) this is actually being tested on. Doesn't change
-          # whether registration works, but there's no reason to simulate an
-          # older device by accident.
-          for want in "iPhone 16 Pro.simdevicetype" "iPhone 16.simdevicetype" \
-                      "iPhone 15 Pro.simdevicetype" "iPhone 15.simdevicetype" \
-                      "iPhone 14 Pro.simdevicetype" "iPhone 14.simdevicetype"; do
+          # Ordered to match the HOST display pixel-for-pixel. The test device
+          # is an iPhone 14 (iPhone14,7): 1170x2532 @3x, 460ppi. Picking that
+          # exact device type means a simulated screen would map 1:1 onto the
+          # real one -- no scaling, no letterboxing -- which is the difference
+          # between "seamless" and "close enough". iPhone 14 Plus/15 share the
+          # same panel geometry and are the next-best fallbacks; 16 Pro
+          # (1206x2622) deliberately ranks below them despite being newer,
+          # since a bigger panel is a worse fit than an identical one.
+          for want in "iPhone 14.simdevicetype" "iPhone 15.simdevicetype" \
+                      "iPhone 16.simdevicetype" "iPhone 14 Pro.simdevicetype" \
+                      "iPhone 15 Pro.simdevicetype" "iPhone 16 Pro.simdevicetype"; do
             DT=$(find /Applications/Xcode_16.1.app -maxdepth 12 -name "$want" 2>/dev/null | head -1)
             [ -n "$DT" ] && break
           done
