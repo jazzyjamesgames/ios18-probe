@@ -342,9 +342,34 @@ jobs:
 
               echo "=== how big is the RuntimeRoot we are NOT shipping ==="
               du -sh "$RT" 2>/dev/null | tee profile-out/runtime-size.txt || true
+
+              # Stage a METADATA-ONLY .simruntime into the app: Info.plist +
+              # Resources/profile.plist, but NOT the 16GB RuntimeRoot and not
+              # the macOS launcher binary. This is the cheap pivotal test --
+              # does CoreSimulator register a runtime at all, and what does it
+              # say it needs for that runtime to become "available"? The
+              # answer scopes the whole download effort before a single GB is
+              # fetched.
+              RTNAME=$(basename "$RT")
+              STAGE="staged-runtime/Runtimes/$RTNAME"
+              mkdir -p "$STAGE/Contents/Resources"
+              cp "$RT/Contents/Info.plist" "$STAGE/Contents/Info.plist" 2>/dev/null || true
+              cp "$RT/Contents/Resources/profile.plist" \
+                 "$STAGE/Contents/Resources/profile.plist" 2>/dev/null || true
+              echo "=== staged metadata-only runtime bundle ==="
+              find staged-runtime | sed "s|staged-runtime|<STAGE>|"
             fi
             sudo hdiutil detach "$MNT" 2>&1 | tail -2 || true
           fi
+
+          # Cheaply confirm the on-device fetch is actually viable for the
+          # target version: a HEAD to the 17.5 direct URL (no 7GB pull). If
+          # this returns a Content-Length, an NSURLSession download on device
+          # would work the same way.
+          echo "=== HEAD check: iOS 17.5 direct download URL ==="
+          curl -sSIL "https://download.developer.apple.com/Developer_Tools/iOS_17.5_Simulator_Runtime/iOS_17.5_Simulator_Runtime.dmg" 2>&1 \
+            | grep -iE "HTTP/|content-length|location" | head -10 \
+            | tee profile-out/ios175-head.txt || true
 
           # What the on-device fetch actually needs: Apple's public index of
           # downloadable simulator runtimes. This signed plist is what Xcode
@@ -550,6 +575,10 @@ jobs:
           cp coresim-stub-out/* Payload/Probe.app/Frameworks/
 
           cp -R staged-profiles Payload/Probe.app/RealProfiles
+          # Metadata-only runtime bundle, if the mount step produced one.
+          if [ -d staged-runtime ]; then
+            cp -R staged-runtime/Runtimes Payload/Probe.app/RealProfiles/Runtimes
+          fi
           find Payload/Probe.app/RealProfiles
 
       - name: Ad-hoc sign with entitlements (App Group intent for AltStore's resign to carry forward)

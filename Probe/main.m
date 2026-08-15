@@ -917,6 +917,59 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
                              outcome];
           flush();
         }
+
+        // The pivotal runtime test. A metadata-only .simruntime (Info.plist +
+        // profile.plist, no 16GB RuntimeRoot) is staged in the app by CI.
+        // Register it and see (a) whether CoreSimulator accepts a runtime at
+        // all, and (b) what it reports about availability -- isAvailableWithError:
+        // should name exactly what's missing, which scopes the whole download
+        // effort before any gigabytes are fetched.
+        NSString *runtimesDir = [[[NSBundle mainBundle] bundlePath]
+            stringByAppendingPathComponent:@"RealProfiles/Runtimes"];
+        [log appendFormat:@"\n=== Registering metadata-only runtime ===\n"
+                           @"runtimes dir: %@\n  contents: %@\n", runtimesDir,
+                           [[NSFileManager defaultManager] contentsOfDirectoryAtPath:runtimesDir
+                                                                               error:nil]];
+        flush();
+
+        __block NSString *rtOutcome = @"(did not finish)";
+        BOOL rtOk = probeRunWithTimeout(30.0, ^{
+          @try {
+            typedef void (*RtPathMsg)(id, SEL, NSString *, BOOL);
+            RtPathMsg rtMsg = (RtPathMsg)objc_msgSend;
+            rtMsg(liveContext,
+                  @selector(supportedRuntimesAddProfilesAtPath:createDefaultDevicesIfNeeded:),
+                  runtimesDir, NO);
+
+            typedef id (*IdMsg)(id, SEL);
+            IdMsg idMsg = (IdMsg)objc_msgSend;
+            id runtimes = idMsg(liveContext, @selector(supportedRuntimes));
+            rtOutcome = [NSString stringWithFormat:@"supportedRuntimes now: %@", runtimes];
+
+            if ([runtimes respondsToSelector:@selector(count)] && [runtimes count] > 0) {
+              rtOutcome = [rtOutcome stringByAppendingString:
+                               @"\n  *** RUNTIME REGISTERED ***"];
+              // Ask each one whether it's available and, if not, why -- that
+              // error is the real map of what the RuntimeRoot download has to
+              // satisfy.
+              for (id rt in runtimes) {
+                typedef BOOL (*AvailMsg)(id, SEL, NSError **);
+                AvailMsg availMsg = (AvailMsg)objc_msgSend;
+                NSError *availErr = nil;
+                BOOL avail = availMsg(rt, @selector(isAvailableWithError:), &availErr);
+                rtOutcome = [rtOutcome stringByAppendingFormat:
+                    @"\n  runtime %@\n    available=%d\n    whyNot=%@",
+                    idMsg(rt, @selector(name)), avail, availErr];
+              }
+            }
+          } @catch (NSException *ex) {
+            rtOutcome = [NSString stringWithFormat:@"EXCEPTION: %@ -- %@", ex.name, ex.reason];
+          }
+        });
+        [log appendFormat:@"  %@\n  %@\n",
+                           rtOk ? @"returned" : @"*** TIMED OUT -- THIS CALL HANGS ***",
+                           rtOutcome];
+        flush();
       }
     }
   }
