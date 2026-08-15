@@ -1307,6 +1307,80 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
                            trace5.count ? [trace5 componentsJoinedByString:@"\n"]
                                         : @"(none)"];
         flush();
+
+        // All three prerequisites now exist on-device: a live
+        // SimServiceContext, a registered device type, and a runtime that
+        // reports available=1. That's a complete configuration, so try what
+        // it's for -- creating an actual SimDevice.
+        //
+        // Register the step-5 runtime (the available one) into the live
+        // context first; everything so far validated SimRuntime standalone,
+        // not through the context's own collection.
+        [log appendString:@"\n=== Creating a SimDevice ===\n"];
+        flush();
+
+        NSString *step5Dir = [rtBuild stringByAppendingPathComponent:@"step5"];
+        __block NSString *createOutcome = @"(did not finish)";
+        BOOL createOk = probeRunWithTimeout(60.0, ^{
+          @try {
+            typedef id (*IdMsg)(id, SEL);
+            IdMsg idMsg = (IdMsg)objc_msgSend;
+
+            ((void (*)(id, SEL, NSString *, BOOL))objc_msgSend)(
+                liveContext,
+                @selector(supportedRuntimesAddProfilesAtPath:createDefaultDevicesIfNeeded:),
+                step5Dir, NO);
+
+            id runtimes = idMsg(liveContext, @selector(supportedRuntimes));
+            id types = idMsg(liveContext, @selector(supportedDeviceTypes));
+            createOutcome = [NSString stringWithFormat:
+                @"context runtimes: %@\n  context deviceTypes: %@", runtimes, types];
+
+            if (![runtimes respondsToSelector:@selector(count)] || [runtimes count] == 0) {
+              createOutcome = [createOutcome stringByAppendingString:
+                  @"\n  (no runtime in the context -- cannot create a device)"];
+              return;
+            }
+
+            id runtime = [runtimes firstObject];
+            id deviceType = [types firstObject];
+
+            // A device set is the container devices live in; point it at a
+            // writable directory of ours rather than the macOS default.
+            NSString *setPath = [docs stringByAppendingPathComponent:@"DeviceSet"];
+            [[NSFileManager defaultManager] createDirectoryAtPath:setPath
+                                     withIntermediateDirectories:YES
+                                                      attributes:nil
+                                                           error:nil];
+            NSError *setErr = nil;
+            id deviceSet = ((id (*)(id, SEL, NSString *, NSError **))objc_msgSend)(
+                liveContext, @selector(deviceSetWithPath:error:), setPath, &setErr);
+            createOutcome = [createOutcome stringByAppendingFormat:
+                @"\n  deviceSet: %@\n  setError: %@", deviceSet, setErr];
+            if (!deviceSet) return;
+
+            NSError *devErr = nil;
+            id device = ((id (*)(id, SEL, id, id, NSString *, NSError **))objc_msgSend)(
+                deviceSet, @selector(createDeviceWithType:runtime:name:error:),
+                deviceType, runtime, @"Probe iPhone 14", &devErr);
+            createOutcome = [createOutcome stringByAppendingFormat:
+                @"\n  createDevice: %@\n  error: %@", device, devErr];
+
+            if (device) {
+              createOutcome = [createOutcome stringByAppendingFormat:
+                  @"\n  *** SIMDEVICE CREATED ***\n  UDID=%@\n  name=%@\n  state=%@\n  devicePath=%@",
+                  idMsg(device, @selector(UDID)), idMsg(device, @selector(name)),
+                  idMsg(device, @selector(stateString)),
+                  idMsg(device, @selector(devicePath))];
+            }
+          } @catch (NSException *ex) {
+            createOutcome = [NSString stringWithFormat:@"EXCEPTION: %@ -- %@",
+                                                       ex.name, ex.reason];
+          }
+        });
+        [log appendFormat:@"  %@\n  %@\n",
+                           createOk ? @"returned" : @"*** TIMED OUT ***", createOutcome];
+        flush();
       }
     }
   }
