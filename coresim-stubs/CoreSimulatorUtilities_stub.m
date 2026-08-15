@@ -164,6 +164,70 @@
 // standard mach/machine.h constants. The disassembly computes the arm64 case
 // as x86_64's value plus 5 (7 -> 12), which is just CPU_TYPE_X86_64 ->
 // CPU_TYPE_ARM64 with the ABI64 bit already set.
+// Reached during actual device creation. -[SimRuntime
+// createInitialContentPath:error:] disassembles to: check the destination
+// doesn't already exist, get sampleContentPath, then
+//     [fileManager sim_copyItemAtPath:sample toCreatedPath:dest error:&err]
+// and NSAssert on the result. Stubbed to nil that read as failure, and the
+// assertion aborted the process uncatchably -- which is as far as device
+// creation got. Real implementation: create the destination's parent chain,
+// clear any stale destination, then copy.
+@interface NSFileManager (CoreSimulatorUtilities)
+- (BOOL)sim_copyItemAtPath:(NSString *)srcPath
+             toCreatedPath:(NSString *)dstPath
+                     error:(NSError **)error;
+@end
+
+@implementation NSFileManager (CoreSimulatorUtilities)
+- (BOOL)sim_copyItemAtPath:(NSString *)srcPath
+             toCreatedPath:(NSString *)dstPath
+                     error:(NSError **)error {
+  if (!srcPath || !dstPath) {
+    if (error) {
+      *error = [NSError errorWithDomain:@"com.apple.CoreSimulator.SimError"
+                                   code:EINVAL
+                               userInfo:@{
+                                 NSLocalizedDescriptionKey :
+                                     @"sim_copyItemAtPath: nil source or destination"
+                               }];
+    }
+    return NO;
+  }
+  NSString *parent = [dstPath stringByDeletingLastPathComponent];
+  [self createDirectoryAtPath:parent
+      withIntermediateDirectories:YES
+                       attributes:nil
+                            error:NULL];
+  // "toCreatedPath" implies the destination is freshly made, so clear any
+  // leftover -- copyItemAtPath: fails outright if the destination exists.
+  [self removeItemAtPath:dstPath error:NULL];
+  return [self copyItemAtPath:srcPath toPath:dstPath error:error];
+}
+@end
+
+// Seen in the missing-selector list alongside the above. Same family as
+// sim_realPath: compare paths after resolving them, so symlinks and /private
+// prefixes don't produce false negatives.
+@interface NSString (SIMRealPathPrefix)
+- (BOOL)sim_realPathHasPrefix:(NSString *)prefix;
+@end
+
+@implementation NSString (SIMRealPathPrefix)
+- (BOOL)sim_realPathHasPrefix:(NSString *)prefix {
+  if (!prefix) return NO;
+  char selfResolved[PATH_MAX];
+  char prefixResolved[PATH_MAX];
+  const char *s = realpath([self fileSystemRepresentation], selfResolved)
+                      ? selfResolved
+                      : [self fileSystemRepresentation];
+  const char *p = realpath([prefix fileSystemRepresentation], prefixResolved)
+                      ? prefixResolved
+                      : [prefix fileSystemRepresentation];
+  if (!s || !p) return NO;
+  return strncmp(s, p, strlen(p)) == 0;
+}
+@end
+
 @interface NSString (SIMCPUType)
 - (int)sim_cpuType;
 @end

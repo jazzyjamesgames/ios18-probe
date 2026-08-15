@@ -412,6 +412,16 @@ jobs:
               cp "$RT/Contents/Info.plist" "$STAGE/Contents/Info.plist" 2>/dev/null || true
               cp "$RT/Contents/Resources/profile.plist" \
                  "$STAGE/Contents/Resources/profile.plist" 2>/dev/null || true
+
+              # SampleContent too: device creation copies this into the new
+              # device's data directory, and at 17MB it fits in an IPA
+              # comfortably (unlike the 16GB RuntimeRoot). This is the first
+              # real runtime CONTENT we ship rather than synthesize.
+              if [ -d "$SC" ]; then
+                mkdir -p staged-samplecontent
+                cp -R "$SC" staged-samplecontent/SampleContent
+                du -sh staged-samplecontent/SampleContent
+              fi
               echo "=== staged metadata-only runtime bundle ==="
               find staged-runtime | sed "s|staged-runtime|<STAGE>|"
             fi
@@ -634,6 +644,10 @@ jobs:
           # Metadata-only runtime bundle, if the mount step produced one.
           if [ -d staged-runtime ]; then
             cp -R staged-runtime/Runtimes Payload/Probe.app/RealProfiles/Runtimes
+          fi
+          if [ -d staged-samplecontent/SampleContent ]; then
+            cp -R staged-samplecontent/SampleContent Payload/Probe.app/RealProfiles/SampleContent
+            du -sh Payload/Probe.app/RealProfiles/SampleContent
           fi
           find Payload/Probe.app/RealProfiles
 

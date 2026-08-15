@@ -1311,6 +1311,21 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
           [[NSData data] writeToFile:
               [hostDir stringByAppendingPathComponent:@"liblaunch_sim.dylib"]
                           atomically:YES];
+
+          // Real SampleContent (17MB, shipped in the app by CI) alongside
+          // RuntimeRoot. Device creation copies this into the new device's
+          // data directory via sim_copyItemAtPath:toCreatedPath:error:, and
+          // last run aborted there because there was nothing to copy. Copied
+          // rather than symlinked: copyItemAtPath: would duplicate a symlink
+          // instead of following it.
+          NSString *resources = [rr stringByDeletingLastPathComponent];
+          NSString *sampleSrc = [[[NSBundle mainBundle] bundlePath]
+              stringByAppendingPathComponent:@"RealProfiles/SampleContent"];
+          if ([fm fileExistsAtPath:sampleSrc]) {
+            [fm copyItemAtPath:sampleSrc
+                        toPath:[resources stringByAppendingPathComponent:@"SampleContent"]
+                         error:nil];
+          }
         });
 
         gTracingFiles = NO;
