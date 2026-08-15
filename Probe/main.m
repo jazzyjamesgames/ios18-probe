@@ -79,6 +79,8 @@ static id probeMissingSelectorStub(id self, SEL _cmd) { return nil; }
 // established was lost with it.
 static NSMutableString *gLog;
 static NSString *gLogPath;
+static UITextView *gTextView;
+static NSString *gLastPublished;
 
 static void probePublish(void) {
   NSMutableString *out = [NSMutableString string];
@@ -88,10 +90,36 @@ static void probePublish(void) {
                       (unsigned long)gMissingSelectors.count,
                       [gMissingSelectors componentsJoinedByString:@"\n"]];
   }
-  [UIPasteboard generalPasteboard].string = out;
   if (gLogPath) {
     [out writeToFile:gLogPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
   }
+  gLastPublished = [out copy];
+  // The probe now runs off the main thread, so UIKit and the pasteboard have
+  // to be touched back on it. Updating the text view here (rather than once
+  // at the end) means a call that never returns still leaves everything
+  // learned up to that point on screen and on the clipboard.
+  NSString *snapshot = gLastPublished;
+  dispatch_async(dispatch_get_main_queue(), ^{
+    [UIPasteboard generalPasteboard].string = snapshot;
+    gTextView.text = snapshot;
+  });
+}
+
+// Runs work on another queue and gives up waiting after `seconds`. A hang
+// inside CoreSimulator can't be cancelled, but it can be survived: the
+// blocked thread is simply abandoned (fine for a probe) while the run
+// continues and reports WHICH call hung. Without this, one blocking call
+// takes the entire run with it and produces a black screen and an empty
+// clipboard -- exactly what the last build did.
+static BOOL probeRunWithTimeout(NSTimeInterval seconds, void (^work)(void)) {
+  dispatch_semaphore_t done = dispatch_semaphore_create(0);
+  dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+    work();
+    dispatch_semaphore_signal(done);
+  });
+  return dispatch_semaphore_wait(
+             done, dispatch_time(DISPATCH_TIME_NOW,
+                                 (int64_t)(seconds * NSEC_PER_SEC))) == 0;
 }
 
 // Only selectors that look like CoreSimulator's own get stubbed. Everything
@@ -229,9 +257,19 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
   // the clipboard is the only channel that actually reaches us on this
   // install, and an abort inside a dispatch barrier can end the process at
   // any point without running anything at the end of launch.
+  gTextView = tv;
   void (^flush)(void) = ^{
     probePublish();
   };
+
+  // Everything below runs OFF the main thread. The previous build did all of
+  // this synchronously inside didFinishLaunchingWithOptions, so when one
+  // CoreSimulator call blocked forever the window never rendered (black
+  // screen), the copy button never became usable, and nothing reached the
+  // clipboard -- the run was unobservable. Returning YES promptly and doing
+  // the work in the background keeps the UI live no matter what the
+  // framework does.
+  dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
 
   NSString *bundlePath = [[NSBundle mainBundle] pathForResource:@"target"
                                                            ofType:@"dylib"];
@@ -270,6 +308,13 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
     }
   }
 
+  // Skipped now that the probe runs off the main thread. NSExtension's launch
+  // path expects the main thread, and this test has already passed repeatedly
+  // (real separate PIDs, all four Darwin checkpoints) -- keeping it here would
+  // risk a background-thread hang in already-proven code and add ~15 lines to
+  // a log that has to be pasted by hand. Flip to YES to re-run it.
+  static const BOOL kRunExtensionTest = NO;
+  if (kRunExtensionTest) {
   [log appendString:@"\n=== Now triggering LaunchHelper as a separate process ===\n"];
 
   NSURL *plugInsURL = [[NSBundle mainBundle] builtInPlugInsURL];
@@ -392,6 +437,8 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
     flush();
   }
 
+  }  // end kRunExtensionTest
+
   [log appendString:@"\n=== Now attempting the real, patched CoreSimulator ===\n"];
   flush();
 
@@ -450,8 +497,14 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
       }
     }
 
+    // The full method dump is ~600 lines and has to be pasted by hand every
+    // run. It already did its job -- it's what revealed
+    // serviceContextForDeveloperDir:connectionType:error: and
+    // standaloneConnectionWithError:. Flip to YES if a new class needs
+    // exploring.
+    static const BOOL kDumpMethodLists = NO;
     [log appendString:@"\n--- method lists for candidate entry-point classes ---\n"];
-    for (NSString *className in toIntrospect) {
+    for (NSString *className in (kDumpMethodLists ? toIntrospect : @[])) {
       Class cls = NSClassFromString(className);
       if (!cls) {
         [log appendFormat:@"\n%@: NOT FOUND\n", className];
@@ -628,31 +681,39 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
       typedef id (*ConnTypeMsg)(Class, SEL, NSString *, NSUInteger, NSError **);
       ConnTypeMsg connMsg = (ConnTypeMsg)objc_msgSend;
       for (NSUInteger connectionType = 0; connectionType <= 3; connectionType++) {
-        [log appendFormat:@"\nserviceContextForDeveloperDir:connectionType:%lu:error: ...\n",
+        [log appendFormat:@"\nserviceContextForDeveloperDir:connectionType:%lu:error: (25s limit)...\n",
                            (unsigned long)connectionType];
         flush();
+        __block NSString *connOutcome = @"(did not finish)";
+        __block id ctx = nil;
+        BOOL connFinished = probeRunWithTimeout(25.0, ^{
         @try {
           NSError *connError = nil;
-          id ctx = connMsg(serviceContextClass,
+          ctx = connMsg(serviceContextClass,
                            @selector(serviceContextForDeveloperDir:connectionType:error:),
                            developerDir, connectionType, &connError);
-          [log appendFormat:@"  result: %@\n  error: %@\n", ctx, connError];
+          connOutcome = [NSString stringWithFormat:@"result: %@\n  error: %@", ctx, connError];
           if (ctx) {
             if (!liveContext) liveContext = ctx;
             // A live context means the daemon was bypassed. Ask it something
             // that requires real internal state, not just a non-nil pointer.
             typedef id (*IdMsg)(id, SEL);
             IdMsg idMsg = (IdMsg)objc_msgSend;
-            [log appendFormat:@"  CONTEXT OBTAINED. developerDir=%@\n",
-                               idMsg(ctx, @selector(developerDir))];
-            [log appendFormat:@"  supportedRuntimes=%@\n",
-                               idMsg(ctx, @selector(supportedRuntimes))];
-            [log appendFormat:@"  supportedDeviceTypes=%@\n",
-                               idMsg(ctx, @selector(supportedDeviceTypes))];
+            connOutcome = [connOutcome stringByAppendingFormat:
+                @"\n  CONTEXT OBTAINED. developerDir=%@\n  supportedRuntimes=%@\n"
+                @"  supportedDeviceTypes=%@",
+                idMsg(ctx, @selector(developerDir)),
+                idMsg(ctx, @selector(supportedRuntimes)),
+                idMsg(ctx, @selector(supportedDeviceTypes))];
           }
         } @catch (NSException *ex) {
-          [log appendFormat:@"  EXCEPTION: %@ -- %@\n", ex.name, ex.reason];
+          connOutcome = [NSString stringWithFormat:@"EXCEPTION: %@ -- %@", ex.name, ex.reason];
         }
+        });
+        [log appendFormat:@"  %@\n  %@\n",
+                           connFinished ? @"returned"
+                                        : @"*** TIMED OUT -- THIS CALL HANGS ***",
+                           connOutcome];
         flush();
       }
 
@@ -697,20 +758,35 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
                            [[NSFileManager defaultManager] contentsOfDirectoryAtPath:realProfiles
                                                                                error:nil]];
         flush();
-        @try {
-          typedef id (*PathMsg)(id, SEL, NSString *);
-          PathMsg pathMsg = (PathMsg)objc_msgSend;
-          pathMsg(liveContext, @selector(supportedDeviceTypesAddProfilesAtPath:), realProfiles);
-          typedef id (*IdMsg)(id, SEL);
-          IdMsg idMsg = (IdMsg)objc_msgSend;
-          id types = idMsg(liveContext, @selector(supportedDeviceTypes));
-          [log appendFormat:@"  supportedDeviceTypes after REAL profile: %@\n", types];
-          if ([types respondsToSelector:@selector(count)] && [types count] > 0) {
-            [log appendString:@"  *** REAL DEVICE TYPE REGISTERED ***\n"];
+        // Prime suspect for the hang that produced a black screen: this is
+        // the first call that makes CoreSimulator go scan a directory, and
+        // its profile-loading machinery has queues and file-system monitors
+        // behind it. Bounded so a hang is a reported result, not the end of
+        // the run.
+        [log appendString:@"  calling supportedDeviceTypesAddProfilesAtPath: (30s limit)...\n"];
+        flush();
+        __block NSString *realOutcome = @"(did not finish)";
+        BOOL finished = probeRunWithTimeout(30.0, ^{
+          @try {
+            typedef id (*PathMsg)(id, SEL, NSString *);
+            PathMsg pathMsg = (PathMsg)objc_msgSend;
+            pathMsg(liveContext, @selector(supportedDeviceTypesAddProfilesAtPath:),
+                    realProfiles);
+            typedef id (*IdMsg)(id, SEL);
+            IdMsg idMsg = (IdMsg)objc_msgSend;
+            id types = idMsg(liveContext, @selector(supportedDeviceTypes));
+            realOutcome = [NSString stringWithFormat:@"supportedDeviceTypes: %@", types];
+            if ([types respondsToSelector:@selector(count)] && [types count] > 0) {
+              realOutcome = [realOutcome
+                  stringByAppendingString:@"\n  *** REAL DEVICE TYPE REGISTERED ***"];
+            }
+          } @catch (NSException *ex) {
+            realOutcome = [NSString stringWithFormat:@"EXCEPTION: %@ -- %@", ex.name, ex.reason];
           }
-        } @catch (NSException *ex) {
-          [log appendFormat:@"  EXCEPTION: %@ -- %@\n", ex.name, ex.reason];
-        }
+        });
+        [log appendFormat:@"  %@\n  %@\n",
+                           finished ? @"returned" : @"*** TIMED OUT -- THIS CALL HANGS ***",
+                           realOutcome];
         flush();
 
         // Schema corrected against the real profile.plist dumped from the CI
@@ -775,46 +851,48 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
                              layout, bundle, wroteInfo, wroteProfile];
           flush();
 
-          @try {
-            typedef id (*PathMsg)(id, SEL, NSString *);
-            PathMsg pathMsg = (PathMsg)objc_msgSend;
-            pathMsg(liveContext, @selector(supportedDeviceTypesAddProfilesAtPath:),
-                    deviceTypesDir);
+          __block NSString *outcome = @"(did not finish)";
+          BOOL ok = probeRunWithTimeout(20.0, ^{
+            @try {
+              typedef id (*PathMsg)(id, SEL, NSString *);
+              PathMsg pathMsg = (PathMsg)objc_msgSend;
+              pathMsg(liveContext, @selector(supportedDeviceTypesAddProfilesAtPath:),
+                      deviceTypesDir);
 
-            typedef id (*IdMsg)(id, SEL);
-            IdMsg idMsg = (IdMsg)objc_msgSend;
-            id types = idMsg(liveContext, @selector(supportedDeviceTypes));
-            [log appendFormat:@"  supportedDeviceTypes now: %@\n", types];
-            if ([types respondsToSelector:@selector(count)] && [types count] > 0) {
-              [log appendFormat:@"  *** DEVICE TYPE REGISTERED (%@ layout) ***\n", layout];
+              typedef id (*IdMsg)(id, SEL);
+              IdMsg idMsg = (IdMsg)objc_msgSend;
+              id types = idMsg(liveContext, @selector(supportedDeviceTypes));
+              outcome = [NSString stringWithFormat:@"supportedDeviceTypes now: %@", types];
+              if ([types respondsToSelector:@selector(count)] && [types count] > 0) {
+                outcome = [outcome stringByAppendingFormat:
+                                       @"\n  *** DEVICE TYPE REGISTERED (%@ layout) ***", layout];
+              }
+            } @catch (NSException *ex) {
+              outcome = [NSString stringWithFormat:@"EXCEPTION: %@ -- %@", ex.name, ex.reason];
             }
-          } @catch (NSException *ex) {
-            [log appendFormat:@"  EXCEPTION: %@ -- %@\n", ex.name, ex.reason];
-          }
+          });
+          [log appendFormat:@"  %@\n  %@\n",
+                             ok ? @"returned" : @"*** TIMED OUT -- THIS CALL HANGS ***",
+                             outcome];
           flush();
         }
       }
     }
   }
 
-  [log appendFormat:@"\n(also written to %@, though the Files app can't see "
+  [log appendString:@"\n=== PROBE COMPLETE ===\n"];
+  [log appendFormat:@"(also written to %@, though the Files app can't see "
                      @"it on this install -- use the clipboard button)", logPath];
   flush();
-
-  tv.text = log;
   NSLog(@"[PROBE]\n%@", log);
-
-  // Copied automatically as well as on the button, so that even if something
-  // later in launch kills the process, the results are already sitting on
-  // the clipboard ready to paste.
-  self.logText = [log copy];
-  [UIPasteboard generalPasteboard].string = self.logText;
+  });  // end background probe block
 
   return YES;
 }
 
 - (void)copyLogTapped:(UIButton *)sender {
-  [UIPasteboard generalPasteboard].string = self.logText ?: @"(no log captured)";
+  [UIPasteboard generalPasteboard].string =
+      gLastPublished ?: @"(no log captured yet)";
   [sender setTitle:@"COPIED -- now paste it" forState:UIControlStateNormal];
 }
 
