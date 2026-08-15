@@ -93,12 +93,18 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          cd "$RT/Contents/Resources"
+          # Work from a WRITABLE directory: the chunk files are written to the
+          # CWD, and the runtime bundle is on a read-only mount ("Read-only
+          # file system: runtimeroot.tar.gz.000"). tar reads from the mount
+          # via -C instead.
+          SRC="$RT/Contents/Resources"
+          mkdir -p /tmp/packwork
+          cd /tmp/packwork
           SUBSET="${{ github.event.inputs.subset }}"
           if [ -n "$SUBSET" ]; then
             TARGET="RuntimeRoot/$SUBSET"
             echo "packing SUBSET: $TARGET"
-            du -sh "$TARGET" || true
+            du -sh "$SRC/$TARGET" || true
           else
             TARGET="RuntimeRoot"
             echo "packing FULL tree"
@@ -109,7 +115,7 @@ jobs:
           #
           # Streams straight from the read-only mount: never materialises the
           # 16GB tree or the full archive on the runner's disk.
-          tar czf - "$TARGET" \
+          tar czf - -C "$SRC" "$TARGET" \
             | python3 "$GITHUB_WORKSPACE/tools/pack_stream_upload.py" \
                 "${{ github.event.inputs.tag }}" runtimeroot.tar.gz
 
