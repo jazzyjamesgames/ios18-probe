@@ -289,6 +289,40 @@ jobs:
           # sim_realPathHasPrefix, and now sim_reentrantSafeCreateDirectoryAtPath),
           # each costing a build + install + crash. The full list lets them be
           # implemented in one pass instead.
+          # Boot's only remaining blocker is a pre-flight resource check:
+          #   Code=67 "insufficient system resources ... maxUserProcs: 1,
+          #   runningUserProcs: 0, enforcedProcBuffer: 100"
+          # It never reaches posix_spawn. Read how SimHostResourceChecker
+          # obtains those numbers -- sysctl, getrlimit, or something else --
+          # since that determines whether the value can be influenced.
+          echo "=== SimHostResourceChecker methods ==="
+          nm -a coresim_thin.bin 2>/dev/null | grep -i "SimHostResourceChecker" \
+            | tee profile-out/resourcechecker-symbols.txt || echo "(none)"
+
+          echo "=== how it queries the limits ==="
+          for pat in "maxUserProcs" "enforcedProcBuffer" "runningUserProcs" \
+                     "kern.maxproc" "maxprocperuid" "insufficient system resources"; do
+            echo "--- $pat ---"
+            strings -a coresim_thin.bin 2>/dev/null | grep -i "$pat" | head -5
+          done | tee profile-out/resourcecheck-strings.txt || true
+
+          echo "=== sysctl/rlimit imports (does it ask the kernel directly?) ==="
+          nm -mu coresim_thin.bin 2>/dev/null \
+            | grep -iE "sysctl|getrlimit|proc_listpids|proc_pidinfo|kinfo" \
+            | tee profile-out/resourcecheck-imports.txt || echo "(none)"
+
+          for fn in "checkResourcesForBootWithError:" "maxUserProcs" \
+                    "runningUserProcs" "enforcedProcBuffer"; do
+            echo "=== disasm: $fn ==="
+            LINE=$(grep -nF "SimHostResourceChecker $fn]:" cs-disasm.txt | head -1 | cut -d: -f1)
+            if [ -n "$LINE" ]; then
+              sed -n "${LINE},$((LINE+70))p" cs-disasm.txt \
+                | tee "profile-out/disasm-RC-$(echo $fn | tr -d ':').txt"
+            else
+              echo "(not found)"
+            fi
+          done
+
           echo "=== all sim_ selectors in CoreSimulator + CoreSimulatorUtilities ==="
           { strings -a coresim_thin.bin 2>/dev/null; strings -a csu_thin.bin 2>/dev/null; } \
             | grep -oE "sim_[A-Za-z0-9_:]+" | sort -u \

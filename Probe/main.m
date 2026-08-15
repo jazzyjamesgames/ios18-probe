@@ -816,8 +816,12 @@ static BOOL probeResolveClassMethod(id self, SEL _cmd, SEL sel) {
     // standaloneConnectionWithError:. Flip to YES if a new class needs
     // exploring.
     static const BOOL kDumpMethodLists = NO;
+    // SimHostResourceChecker is dumped regardless: boot now fails ONLY on its
+    // pre-flight verdict ("maxUserProcs: 1 ... enforcedProcBuffer: 100"), so
+    // its method surface is the next thing worth reading.
+    NSArray *dumpList = kDumpMethodLists ? toIntrospect : @[ @"SimHostResourceChecker" ];
     [log appendString:@"\n--- method lists for candidate entry-point classes ---\n"];
-    for (NSString *className in (kDumpMethodLists ? toIntrospect : @[])) {
+    for (NSString *className in dumpList) {
       Class cls = NSClassFromString(className);
       if (!cls) {
         [log appendFormat:@"\n%@: NOT FOUND\n", className];
