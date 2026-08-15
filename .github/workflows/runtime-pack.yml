@@ -25,8 +25,11 @@ on:
       subset:
         description: >
           Path under RuntimeRoot to pack instead of the whole tree, e.g.
-          usr/lib/system. Lets the whole download+extract path be proven on
-          ~50MB before committing to a multi-GB transfer. Empty = full tree.
+          usr/lib/system, which lets the download+extract path be proven on a
+          few MB before committing to a multi-GB transfer. Use the literal
+          value "full" for the entire tree -- an EMPTY value does not work,
+          because GitHub substitutes the default for empty inputs, which
+          silently re-packs the subset instead.
         default: "usr/lib/system"
 
 permissions:
@@ -101,6 +104,12 @@ jobs:
           mkdir -p /tmp/packwork
           cd /tmp/packwork
           SUBSET="${{ github.event.inputs.subset }}"
+          # "full"/"none" mean the whole tree. An empty value can't be used as
+          # the signal: GitHub replaces empty inputs with the default, so
+          # `-f subset=` silently re-packed usr/lib/system and reported success.
+          if [ "$SUBSET" = "full" ] || [ "$SUBSET" = "none" ]; then
+            SUBSET=""
+          fi
           if [ -n "$SUBSET" ]; then
             TARGET="RuntimeRoot/$SUBSET"
             echo "packing SUBSET: $TARGET"
