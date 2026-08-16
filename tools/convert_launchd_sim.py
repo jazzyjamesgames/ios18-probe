@@ -100,21 +100,54 @@ def convert(slice_bytes):
     if not made_id:
         raise SystemExit("no LC_LOAD_DYLINKER to convert into LC_ID_DYLIB")
 
-    # Pass 2: drop LC_CODE_SIGNATURE, closing the gap and fixing the counts so
-    # codesign signs a clean binary.
+    # Pass 2: strip LC_CODE_SIGNATURE cleanly, so ldid (SideStore's signer) can
+    # add a fresh one. The first version only removed the load command; it left
+    # the stale signature bytes in the file and left __LINKEDIT's filesize still
+    # covering them. That inconsistency crashed ldid:
+    #
+    #   ldid.cpp(1461): _assert(): end >= size - 0x10
+    #
+    # A properly unsigned binary has __LINKEDIT ending exactly at its real
+    # symbol/string content, with the file ending there too. The signature is
+    # always the last thing in the file, so removing it means: shrink
+    # __LINKEDIT to end where the signature began, drop the load command, fix
+    # the header counts, and truncate the file to the signature's old offset.
+    linkedit_off = None
+    sig_cmd_off = sig_cmdsize = sig_dataoff = None
     off = 32
     for _ in range(ncmds):
         cmd, cmdsize = struct.unpack_from("<II", data, off)
-        if (cmd & ~LC_REQ_DYLD) == LC_CODE_SIGNATURE:
-            tail_start = off + cmdsize
-            tail_end = 32 + sizeofcmds
-            data[off:tail_end - cmdsize] = data[tail_start:tail_end]
-            for i in range(tail_end - cmdsize, tail_end):
-                data[i] = 0
-            struct.pack_into("<I", data, 16, ncmds - 1)
-            struct.pack_into("<I", data, 20, sizeofcmds - cmdsize)
-            break
+        base = cmd & ~LC_REQ_DYLD
+        if base == 0x19:  # LC_SEGMENT_64
+            segname = data[off + 8:off + 24].split(b"\x00")[0]
+            if segname == b"__LINKEDIT":
+                linkedit_off = off
+        elif base == LC_CODE_SIGNATURE:
+            sig_cmd_off, sig_cmdsize = off, cmdsize
+            sig_dataoff = struct.unpack_from("<I", data, off + 8)[0]
         off += cmdsize
+
+    if sig_dataoff is not None:
+        if linkedit_off is not None:
+            le_fileoff = struct.unpack_from("<Q", data, linkedit_off + 40)[0]
+            new_filesize = sig_dataoff - le_fileoff
+            struct.pack_into("<Q", data, linkedit_off + 48, new_filesize)
+            vmsize = (new_filesize + 0x3FFF) & ~0x3FFF
+            struct.pack_into("<Q", data, linkedit_off + 32, vmsize)
+
+        tail_start = sig_cmd_off + sig_cmdsize
+        tail_end = 32 + sizeofcmds
+        data[sig_cmd_off:tail_end - sig_cmdsize] = data[tail_start:tail_end]
+        for i in range(tail_end - sig_cmdsize, tail_end):
+            data[i] = 0
+        struct.pack_into("<I", data, 16, ncmds - 1)
+        struct.pack_into("<I", data, 20, sizeofcmds - sig_cmdsize)
+
+        # Truncate the signature blob off the end. Guard against it not being
+        # last (it always is for Apple binaries, but a bad assumption here
+        # would silently corrupt the file).
+        if sig_dataoff <= len(data):
+            data = data[:sig_dataoff]
 
     return bytes(data)
 

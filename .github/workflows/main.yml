@@ -491,6 +491,16 @@ jobs:
               mkdir -p staged-launchd
               python3 tools/convert_launchd_sim.py "$LS" staged-launchd/launchd_sim.dylib \
                 && otool -hv staged-launchd/launchd_sim.dylib | tail -2
+
+              # Sign it with ldid HERE -- ldid is SideStore's signer, and its
+              # assert on a malformed binary (end >= size - 0x10) crashed the
+              # install once. Reproducing that in CI means the phone never sees
+              # a binary ldid can't handle. Failure of this command fails the
+              # build on purpose.
+              brew list ldid >/dev/null 2>&1 || brew install ldid
+              echo "=== ldid smoke-sign of the converted launchd_sim ==="
+              ldid -S staged-launchd/launchd_sim.dylib
+              echo "ldid -S succeeded; SideStore will be able to sign it too"
             fi
 
             if [ -n "$RT" ]; then
