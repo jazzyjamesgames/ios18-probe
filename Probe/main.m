@@ -597,6 +597,49 @@ static void probeTestCodeLoading(NSMutableString *log, NSString *runtimeRoot) {
   [log appendFormat:@"  patched %d platform field(s) iOS-simulator -> iOS\n",
                     flipped];
 
+  // That cleared the platform rejection, and dyld moved on to:
+  //
+  //   MH_DYLIB is missing LC_ID_DYLIB
+  //
+  // A dylib has to declare its own install name. Load commands cannot simply
+  // be appended -- they live in a fixed-size region ahead of __TEXT, and
+  // growing it would mean relocating everything after it. But an executable
+  // carries LC_LOAD_DYLINKER naming /usr/lib/dyld, which a dylib has no use
+  // for, and it is large enough to hold an LC_ID_DYLIB (24-byte header plus a
+  // short name). Rewrite it in place, leaving ncmds and sizeofcmds untouched.
+  off = 32;
+  BOOL madeID = NO;
+  NSMutableArray *cmds = [NSMutableArray array];
+  for (uint32_t i = 0; i < ncmds && off + 8 <= bin.length; i++) {
+    uint32_t *cmd = (uint32_t *)((uint8_t *)bin.mutableBytes + off);
+    uint32_t cmdID = cmd[0], cmdSize = cmd[1];
+    if (cmdSize == 0 || off + cmdSize > bin.length) break;
+    [cmds addObject:[NSString stringWithFormat:@"0x%x/%u", cmdID, cmdSize]];
+
+    if (!madeID && cmdID == 0xe /* LC_LOAD_DYLINKER */ && cmdSize >= 32) {
+      NSUInteger room = cmdSize - 24;          // bytes available for the name
+      const char *name = (room >= 12) ? "launchd_sim" : "l";
+      memset(cmd, 0, cmdSize);
+      cmd[0] = 0xd;              // LC_ID_DYLIB
+      cmd[1] = cmdSize;
+      cmd[2] = 24;               // name offset within this command
+      cmd[3] = 1;                // timestamp
+      cmd[4] = 0x00010000;       // current_version 1.0.0
+      cmd[5] = 0x00010000;       // compatibility_version 1.0.0
+      strlcpy((char *)cmd + 24, name, room);
+      madeID = YES;
+      [log appendFormat:@"  converted LC_LOAD_DYLINKER (%u bytes) -> "
+                         "LC_ID_DYLIB \"%s\"\n", cmdSize, name];
+    }
+    off += cmdSize;
+  }
+  if (!madeID) {
+    [log appendString:@"  no LC_LOAD_DYLINKER to repurpose; dlopen will still "
+                       "refuse for want of LC_ID_DYLIB\n"];
+  }
+  [log appendFormat:@"  load commands: %@\n",
+                    [cmds componentsJoinedByString:@" "]];
+
   NSString *dst = [NSHomeDirectory()
       stringByAppendingPathComponent:@"Documents/launchd_sim_as_dylib.dylib"];
   [fm removeItemAtPath:dst error:NULL];
