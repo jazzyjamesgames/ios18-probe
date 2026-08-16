@@ -836,23 +836,26 @@ static void probeTestCodeLoading(NSMutableString *log, NSString *runtimeRoot) {
   //    MH_BUNDLE from a memory buffer rather than a file, which is how some
   //    loaders sidestep the file-backed path entirely. Whether it still runs
   //    the same validation on iOS 26 is worth knowing directly.
+  //    The headers mark it unavailable on iOS, so it is resolved by name at
+  //    runtime: whether dyld still exports it is itself part of the answer.
   uint32_t *bhdr = (uint32_t *)bin.mutableBytes;
   bhdr[3] = 8;   // MH_BUNDLE
-  NSObjectFileImage img = NULL;
-  NSObjectFileImageReturnCode rc2 =
-      NSCreateObjectFileImageFromMemory(bin.bytes, bin.length, &img);
-  [log appendFormat:@"\n  NSCreateObjectFileImageFromMemory (MH_BUNDLE) -> %d%s\n",
-                    (int)rc2,
-                    rc2 == NSObjectFileImageSuccess ? "  (success)" : ""];
-  if (rc2 == NSObjectFileImageSuccess) {
-    NSModule mod = NSLinkModule(img, "launchd_sim",
-                                NSLINKMODULE_OPTION_PRIVATE |
-                                NSLINKMODULE_OPTION_RETURN_ON_ERROR);
-    [log appendFormat:@"  NSLinkModule -> %s\n", mod ? "LINKED" : "failed"];
-    if (!mod) {
-      NSLinkEditErrors c; int n; const char *fname; const char *emsg;
-      NSLinkEditError(&c, &n, &fname, &emsg);
-      [log appendFormat:@"  NSLinkEditError: %s\n", emsg ?: "(none)"];
+  typedef int (*CreateFromMemFn)(const void *, size_t, void **);
+  typedef void *(*LinkModuleFn)(void *, const char *, uint32_t);
+  CreateFromMemFn createFromMem =
+      (CreateFromMemFn)dlsym(RTLD_DEFAULT, "NSCreateObjectFileImageFromMemory");
+  LinkModuleFn linkModule = (LinkModuleFn)dlsym(RTLD_DEFAULT, "NSLinkModule");
+  [log appendFormat:@"\n  NSCreateObjectFileImageFromMemory symbol: %s\n",
+                    createFromMem ? "present" : "NOT exported by dyld on iOS"];
+  if (createFromMem && linkModule) {
+    void *img = NULL;
+    int rc2 = createFromMem(bin.bytes, bin.length, &img);
+    [log appendFormat:@"  create (MH_BUNDLE from memory) -> %d%s\n", rc2,
+                      rc2 == 1 ? "  (success)" : ""];
+    if (rc2 == 1) {
+      // PRIVATE | RETURN_ON_ERROR
+      void *mod = linkModule(img, "launchd_sim", 0x2 | 0x4);
+      [log appendFormat:@"  NSLinkModule -> %s\n", mod ? "LINKED" : "failed"];
     }
   }
 }
