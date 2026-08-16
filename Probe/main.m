@@ -858,6 +858,25 @@ static void probeTestCodeLoading(NSMutableString *log, NSString *runtimeRoot) {
       [log appendFormat:@"  NSLinkModule -> %s\n", mod ? "LINKED" : "failed"];
     }
   }
+
+  // The real fix: a launchd_sim converted in CI and shipped in the app bundle,
+  // where SideStore signs it with the app team certificate on install. That is
+  // the identity the container copy lacks. If this loads, the code-loading
+  // question is answered yes and only the dependencies remain.
+  NSString *bundledLaunchd = [[[NSBundle mainBundle] bundlePath]
+      stringByAppendingPathComponent:@"Frameworks/launchd_sim.dylib"];
+  [log appendFormat:@"\n  bundled launchd_sim (CI-converted, SideStore-signed):\n"
+                     "    present=%d  %@\n",
+                    [fm fileExistsAtPath:bundledLaunchd], bundledLaunchd];
+  if ([fm fileExistsAtPath:bundledLaunchd]) {
+    dlerror();
+    void *bh = dlopen(bundledLaunchd.fileSystemRepresentation,
+                      RTLD_NOW | RTLD_LOCAL);
+    const char *berr = dlerror();
+    [log appendFormat:@"    dlopen -> %s\n    dlerror: %s\n",
+                      bh ? "*** SUCCESS ***" : "failed", berr ?: "(none)"];
+    if (bh) dlclose(bh);
+  }
 }
 
 // libobjc's hook, not Foundation's. The assertion is thrown on

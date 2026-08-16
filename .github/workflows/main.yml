@@ -759,6 +759,40 @@ jobs:
           mkdir -p Payload/Probe.app/Frameworks
           cp coresim-stub-out/* Payload/Probe.app/Frameworks/
 
+          # Convert launchd_sim and ship it in Frameworks/ so SideStore signs
+          # it with the app team certificate on install. The device proved this
+          # is the only thing missing: an ad-hoc-signed conversion is READ by
+          # dyld and then refused under library validation (EPERM), while one of
+          # our own team-signed dylibs loads from the very same directory. So do
+          # the Mach-O surgery here and let SideStore provide the identity.
+          #
+          # launchd_sim lives inside the installed iOS simulator runtime. Find
+          # it wherever this runner keeps the runtime; mount an image only if a
+          # loose copy isn't already present.
+          LS=""
+          for cand in \
+            /Library/Developer/CoreSimulator/Volumes/*/Library/Developer/CoreSimulator/Profiles/Runtimes/*.simruntime/Contents/Resources/RuntimeRoot/sbin/launchd_sim \
+            /Library/Developer/CoreSimulator/Profiles/Runtimes/*.simruntime/Contents/Resources/RuntimeRoot/sbin/launchd_sim \
+            "$(xcrun --sdk iphonesimulator --show-sdk-platform-path 2>/dev/null)"/Developer/Library/CoreSimulator/Profiles/Runtimes/*.simruntime/Contents/Resources/RuntimeRoot/sbin/launchd_sim; do
+            if [ -f "$cand" ]; then LS="$cand"; break; fi
+          done
+          if [ -z "$LS" ]; then
+            IMG=$(ls -S /Library/Developer/CoreSimulator/Images/*.dmg 2>/dev/null | head -1)
+            if [ -n "$IMG" ]; then
+              mkdir -p /tmp/lsmount
+              sudo hdiutil attach "$IMG" -mountpoint /tmp/lsmount -nobrowse -readonly || true
+              LS=$(find /tmp/lsmount -maxdepth 8 -path '*/sbin/launchd_sim' -type f 2>/dev/null | head -1)
+            fi
+          fi
+          echo "launchd_sim source: ${LS:-<none found>}"
+          if [ -n "$LS" ] && [ -f "$LS" ]; then
+            python3 tools/convert_launchd_sim.py "$LS" \
+              Payload/Probe.app/Frameworks/launchd_sim.dylib
+            otool -hv Payload/Probe.app/Frameworks/launchd_sim.dylib | tail -2
+          else
+            echo "WARNING: launchd_sim not located; bundled copy will be absent"
+          fi
+
           # Also ship CoreSimulator as a REAL framework bundle. Boot reached
           # -[SimDeviceIOServer loadAllBundlesWithError:], which does
           # [NSBundle bundleWithIdentifier:@"com.apple.CoreSimulator"] to find
