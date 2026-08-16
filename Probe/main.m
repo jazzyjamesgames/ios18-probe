@@ -640,6 +640,44 @@ static void probeTestCodeLoading(NSMutableString *log, NSString *runtimeRoot) {
   [log appendFormat:@"  load commands: %@\n",
                     [cmds componentsJoinedByString:@" "]];
 
+  // With LC_ID_DYLIB in place dyld got to the signature and said:
+  //
+  //   code signature invalid ... (errno=85)
+  //
+  // Which is correct and unavoidable: this binary IS signed by Apple, and the
+  // three edits above changed bytes the signature covers. Re-signing is not an
+  // option, so drop the signature and let CS_DEBUGGED account for the code
+  // being unsigned -- the same allowance that makes JIT possible at all.
+  //
+  // Removing a load command means closing the gap and fixing the header
+  // counts, not just blanking it: dyld walks ncmds entries of sizeofcmds
+  // bytes, so a hole would desynchronise the whole walk.
+  uint32_t sizeofcmds = hdr[5];
+  off = 32;
+  for (uint32_t i = 0; i < ncmds && off + 8 <= bin.length; i++) {
+    uint8_t *base = (uint8_t *)bin.mutableBytes;
+    uint32_t *cmd = (uint32_t *)(base + off);
+    uint32_t cmdID = cmd[0], cmdSize = cmd[1];
+    if (cmdSize == 0 || off + cmdSize > bin.length) break;
+
+    if (cmdID == 0x1d /* LC_CODE_SIGNATURE */) {
+      [log appendFormat:@"  LC_CODE_SIGNATURE: blob at 0x%x size 0x%x -- removing\n",
+                        cmd[2], cmd[3]];
+      uint32_t tailStart = off + cmdSize;
+      uint32_t tailEnd = 32 + sizeofcmds;
+      if (tailEnd > tailStart) {
+        memmove(base + off, base + tailStart, tailEnd - tailStart);
+      }
+      memset(base + tailEnd - cmdSize, 0, cmdSize);
+      hdr[4] = ncmds - 1;          // ncmds
+      hdr[5] = sizeofcmds - cmdSize;  // sizeofcmds
+      [log appendFormat:@"  ncmds %u -> %u, sizeofcmds %u -> %u\n",
+                        ncmds, hdr[4], sizeofcmds, hdr[5]];
+      break;
+    }
+    off += cmdSize;
+  }
+
   NSString *dst = [NSHomeDirectory()
       stringByAppendingPathComponent:@"Documents/launchd_sim_as_dylib.dylib"];
   [fm removeItemAtPath:dst error:NULL];
