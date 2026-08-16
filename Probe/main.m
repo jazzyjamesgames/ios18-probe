@@ -21,6 +21,7 @@
 #import <sys/mman.h>
 #import <mach/mach.h>
 #import <libkern/OSByteOrder.h>
+#import <CommonCrypto/CommonDigest.h>
 #import "RuntimeFetcher.h"
 
 @interface NSExtension : NSObject
@@ -436,6 +437,133 @@ extern int csops(pid_t pid, unsigned int ops, void *useraddr, size_t usersize);
 #define PROBE_CS_VALID 0x00000001
 #define PROBE_CS_GET_TASK_ALLOW 0x00000004
 
+// Write an ad-hoc code signature over a Mach-O slice, in place.
+//
+// dyld rejected the unsigned binary with "Code has to be at least ad-hoc
+// signed", which is a much smaller demand than it sounds: an ad-hoc signature
+// has no certificate and no CMS blob, just a CodeDirectory holding a SHA-256
+// hash of every page, and a flag saying it vouches for nothing but itself.
+// Apple's own `codesign -s -` produces exactly this. Nothing here forges an
+// identity -- the signature asserts no signer, which is precisely why the
+// kernel treats such code as untrusted and only CS_DEBUGGED lets it load.
+//
+// Everything inside the signature blob is big-endian, unlike the rest of the
+// file.
+static BOOL probeAdhocSign(NSMutableData *bin, NSMutableString *log) {
+  const uint32_t kPageSize = 4096;
+  const uint32_t kCDHeaderLen = 88;      // CodeDirectory version 0x20400
+  const char *ident = "launchd_sim";
+
+  // Locate the pieces that have to be updated, by offset rather than pointer:
+  // mutating the NSMutableData below can move its buffer.
+  uint32_t ncmds = ((uint32_t *)bin.mutableBytes)[4];
+  uint32_t sigCmdOff = 0, linkeditCmdOff = 0;
+  uint64_t textFileSize = 0;
+  uint32_t off = 32;
+  for (uint32_t i = 0; i < ncmds && off + 8 <= bin.length; i++) {
+    const uint8_t *base = bin.mutableBytes;
+    uint32_t cmdID = *(const uint32_t *)(base + off);
+    uint32_t cmdSize = *(const uint32_t *)(base + off + 4);
+    if (cmdSize == 0 || off + cmdSize > bin.length) break;
+    if (cmdID == 0x1d) sigCmdOff = off;
+    if (cmdID == 0x19) {
+      const char *seg = (const char *)(base + off + 8);
+      if (strcmp(seg, "__LINKEDIT") == 0) linkeditCmdOff = off;
+      if (strcmp(seg, "__TEXT") == 0) {
+        textFileSize = *(const uint64_t *)(base + off + 48);
+      }
+    }
+    off += cmdSize;
+  }
+  if (!sigCmdOff || !linkeditCmdOff) {
+    [log appendFormat:@"  cannot sign: LC_CODE_SIGNATURE=%u __LINKEDIT=%u\n",
+                      sigCmdOff, linkeditCmdOff];
+    return NO;
+  }
+
+  // Sign everything up to where the signature itself begins. Apple's original
+  // blob sat there too, so reuse that offset and drop the old contents.
+  uint32_t sigOffset = *(uint32_t *)((uint8_t *)bin.mutableBytes + sigCmdOff + 8);
+  if (sigOffset == 0 || sigOffset > bin.length) {
+    [log appendFormat:@"  cannot sign: implausible signature offset 0x%x\n", sigOffset];
+    return NO;
+  }
+  [bin setLength:sigOffset];
+
+  uint32_t nCodeSlots = (sigOffset + kPageSize - 1) / kPageSize;
+  uint32_t identLen = (uint32_t)strlen(ident) + 1;
+  uint32_t hashOffset = kCDHeaderLen + identLen;
+  uint32_t cdLen = hashOffset + nCodeSlots * CC_SHA256_DIGEST_LENGTH;
+  uint32_t superHeaderLen = 12 + 8;      // SuperBlob header + one index entry
+  uint32_t totalLen = superHeaderLen + cdLen;
+
+  NSMutableData *blob = [NSMutableData dataWithLength:totalLen];
+  uint8_t *b = blob.mutableBytes;
+
+#define PUT32(p, v) (*(uint32_t *)(p) = OSSwapHostToBigInt32(v))
+#define PUT64(p, v) (*(uint64_t *)(p) = OSSwapHostToBigInt64(v))
+
+  // CS_SuperBlob: one embedded CodeDirectory.
+  PUT32(b + 0, 0xfade0cc0);              // CSMAGIC_EMBEDDED_SIGNATURE
+  PUT32(b + 4, totalLen);
+  PUT32(b + 8, 1);                       // one blob
+  PUT32(b + 12, 0);                      // CSSLOT_CODEDIRECTORY
+  PUT32(b + 16, superHeaderLen);         // its offset
+
+  uint8_t *cd = b + superHeaderLen;
+  PUT32(cd + 0, 0xfade0c02);             // CSMAGIC_CODEDIRECTORY
+  PUT32(cd + 4, cdLen);
+  PUT32(cd + 8, 0x20400);                // version
+  PUT32(cd + 12, 0x00000002);            // CS_ADHOC
+  PUT32(cd + 16, hashOffset);
+  PUT32(cd + 20, kCDHeaderLen);          // identOffset
+  PUT32(cd + 24, 0);                     // nSpecialSlots
+  PUT32(cd + 28, nCodeSlots);
+  PUT32(cd + 32, sigOffset);             // codeLimit
+  cd[36] = CC_SHA256_DIGEST_LENGTH;      // hashSize
+  cd[37] = 2;                            // hashType: SHA-256
+  cd[38] = 0;                            // platform
+  cd[39] = 12;                           // pageSize, log2
+  PUT32(cd + 40, 0);                     // spare2
+  PUT32(cd + 44, 0);                     // scatterOffset
+  PUT32(cd + 48, 0);                     // teamOffset
+  PUT32(cd + 52, 0);                     // spare3
+  PUT64(cd + 56, 0);                     // codeLimit64 (unused below 4GB)
+  PUT64(cd + 64, 0);                     // execSegBase
+  PUT64(cd + 72, textFileSize);          // execSegLimit
+  PUT64(cd + 80, 0);                     // execSegFlags (not a main binary)
+  memcpy(cd + kCDHeaderLen, ident, identLen);
+
+  const uint8_t *content = bin.bytes;
+  for (uint32_t i = 0; i < nCodeSlots; i++) {
+    uint32_t start = i * kPageSize;
+    uint32_t len = (start + kPageSize <= sigOffset) ? kPageSize : (sigOffset - start);
+    CC_SHA256(content + start, len, cd + hashOffset + i * CC_SHA256_DIGEST_LENGTH);
+  }
+
+#undef PUT32
+#undef PUT64
+
+  [bin appendData:blob];
+
+  // Repoint LC_CODE_SIGNATURE and grow __LINKEDIT to cover the new blob,
+  // otherwise the signature sits outside any mapped segment.
+  uint8_t *base = bin.mutableBytes;
+  *(uint32_t *)(base + sigCmdOff + 8) = sigOffset;    // dataoff
+  *(uint32_t *)(base + sigCmdOff + 12) = totalLen;    // datasize
+
+  uint64_t leFileOff = *(uint64_t *)(base + linkeditCmdOff + 40);
+  uint64_t newFileSize = (sigOffset + totalLen) - leFileOff;
+  *(uint64_t *)(base + linkeditCmdOff + 48) = newFileSize;
+  uint64_t vmsize = (newFileSize + 0x3fff) & ~0x3fffULL;
+  *(uint64_t *)(base + linkeditCmdOff + 32) = vmsize;
+
+  [log appendFormat:@"  ad-hoc signed: %u page hashes over 0x%x bytes, "
+                     "blob %u bytes at 0x%x\n",
+                    nCodeSlots, sigOffset, totalLen, sigOffset];
+  return YES;
+}
+
 static void probeTestCodeLoading(NSMutableString *log, NSString *runtimeRoot) {
   NSUInteger startLen = log.length;
   [log appendString:@"\n=== F. Can launchd_sim's code be loaded into a process? ===\n"];
@@ -640,43 +768,17 @@ static void probeTestCodeLoading(NSMutableString *log, NSString *runtimeRoot) {
   [log appendFormat:@"  load commands: %@\n",
                     [cmds componentsJoinedByString:@" "]];
 
-  // With LC_ID_DYLIB in place dyld got to the signature and said:
+  // Removing the signature was the wrong half of the move. dyld answered:
   //
-  //   code signature invalid ... (errno=85)
+  //   mapped file has no cdhash, completely unsigned?
+  //   Code has to be at least ad-hoc signed.
   //
-  // Which is correct and unavoidable: this binary IS signed by Apple, and the
-  // three edits above changed bytes the signature covers. Re-signing is not an
-  // option, so drop the signature and let CS_DEBUGGED account for the code
-  // being unsigned -- the same allowance that makes JIT possible at all.
-  //
-  // Removing a load command means closing the gap and fixing the header
-  // counts, not just blanking it: dyld walks ncmds entries of sizeofcmds
-  // bytes, so a hole would desynchronise the whole walk.
-  uint32_t sizeofcmds = hdr[5];
-  off = 32;
-  for (uint32_t i = 0; i < ncmds && off + 8 <= bin.length; i++) {
-    uint8_t *base = (uint8_t *)bin.mutableBytes;
-    uint32_t *cmd = (uint32_t *)(base + off);
-    uint32_t cmdID = cmd[0], cmdSize = cmd[1];
-    if (cmdSize == 0 || off + cmdSize > bin.length) break;
-
-    if (cmdID == 0x1d /* LC_CODE_SIGNATURE */) {
-      [log appendFormat:@"  LC_CODE_SIGNATURE: blob at 0x%x size 0x%x -- removing\n",
-                        cmd[2], cmd[3]];
-      uint32_t tailStart = off + cmdSize;
-      uint32_t tailEnd = 32 + sizeofcmds;
-      if (tailEnd > tailStart) {
-        memmove(base + off, base + tailStart, tailEnd - tailStart);
-      }
-      memset(base + tailEnd - cmdSize, 0, cmdSize);
-      hdr[4] = ncmds - 1;          // ncmds
-      hdr[5] = sizeofcmds - cmdSize;  // sizeofcmds
-      [log appendFormat:@"  ncmds %u -> %u, sizeofcmds %u -> %u\n",
-                        ncmds, hdr[4], sizeofcmds, hdr[5]];
-      break;
-    }
-    off += cmdSize;
-  }
+  // It does not want an Apple signature -- it wants an AD-HOC one, which
+  // carries no certificate at all: a CodeDirectory listing a SHA-256 hash per
+  // page. That is exactly what `codesign -s -` writes, and it can be built
+  // here with CommonCrypto. So the signature gets replaced rather than
+  // deleted, which also means keeping LC_CODE_SIGNATURE and repointing it.
+  probeAdhocSign(bin, log);
 
   NSString *dst = [NSHomeDirectory()
       stringByAppendingPathComponent:@"Documents/launchd_sim_as_dylib.dylib"];
