@@ -484,7 +484,8 @@ jobs:
             # into later steps. SideStore signs it with the app team on install,
             # which is the identity library validation demands (proven on
             # device: an ad-hoc copy is refused, a team-signed one loads).
-            LS=$(find "$MNT" -maxdepth 10 -path '*/RuntimeRoot/sbin/launchd_sim' -type f 2>/dev/null | head -1)
+            LS="$RT/Contents/Resources/RuntimeRoot/sbin/launchd_sim"
+            [ -f "$LS" ] || LS=$(sudo find "$MNT" -maxdepth 14 -path '*/RuntimeRoot/sbin/launchd_sim' -type f 2>/dev/null | head -1)
             echo "launchd_sim in mounted runtime: ${LS:-<none>}"
             if [ -n "$LS" ]; then
               mkdir -p staged-launchd
