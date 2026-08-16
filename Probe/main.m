@@ -19,6 +19,7 @@
 #import <unistd.h>
 #import <sys/syslimits.h>
 #import <sys/mman.h>
+#import <mach/mach.h>
 #import "RuntimeFetcher.h"
 
 @interface NSExtension : NSObject
@@ -435,6 +436,7 @@ extern int csops(pid_t pid, unsigned int ops, void *useraddr, size_t usersize);
 #define PROBE_CS_GET_TASK_ALLOW 0x00000004
 
 static void probeTestCodeLoading(NSMutableString *log, NSString *runtimeRoot) {
+  NSUInteger startLen = log.length;
   [log appendString:@"\n=== F. Can launchd_sim's code be loaded into a process? ===\n"];
 
   uint32_t flags = 0;
@@ -449,26 +451,61 @@ static void probeTestCodeLoading(NSMutableString *log, NSString *runtimeRoot) {
                              : @"NOT available -- launch via SideStore with JIT "
                                 "enabled to change this"];
 
-  // Whether the kernel will even hand out an executable mapping.
+  // Whether the kernel will hand out an executable mapping.
+  //
+  // NOTHING here is executed. An earlier version jumped to this page when
+  // CS_DEBUGGED was set, on the theory that the flag made it safe. It is not:
+  // with JIT attached, mprotect(R|X) RETURNED SUCCESS and the jump still died
+  // with KERN_PROTECTION_FAILURE, because the mapping's MAX protection is rw-
+  // and execute was never actually granted -- mprotect cannot raise protection
+  // beyond the maximum. The crash took the run down before the dlopen test,
+  // which is the part that matters, ever ran.
+  //
+  // So report the protections instead, including the maximum, which is the
+  // number that actually decides the question.
   void *page = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
                     MAP_ANON | MAP_PRIVATE, -1, 0);
   if (page != MAP_FAILED) {
-    uint32_t code[] = { 0xd2800540, 0xd65f03c0 };  // mov x0, #42 ; ret
-    memcpy(page, code, sizeof(code));
+    errno = 0;
     int mp = mprotect(page, 4096, PROT_READ | PROT_EXEC);
-    [log appendFormat:@"  mprotect(R|X) -> %d%s\n", mp,
-                      mp == 0 ? "" : " (errno above)"];
-    if (mp == 0 && debugged) {
-      int (*fn)(void) = (int (*)(void))page;
-      [log appendFormat:@"  executed it -> %d (expected 42)\n", fn()];
-    } else if (mp == 0) {
-      [log appendString:@"  not executing it: without CS_DEBUGGED that is a "
-                         "hard kill, and the flag already answers the question\n"];
+    int mpErrno = errno;
+    [log appendFormat:@"  mprotect(R|X) -> %d errno=%d (%s)\n",
+                      mp, mp == 0 ? 0 : mpErrno,
+                      mp == 0 ? "ok" : strerror(mpErrno)];
+
+    vm_address_t addr = (vm_address_t)page;
+    vm_size_t vsize = 0;
+    vm_region_basic_info_data_64_t info;
+    mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+    mach_port_t object = MACH_PORT_NULL;
+    kern_return_t kr = vm_region_64(mach_task_self(), &addr, &vsize,
+                                    VM_REGION_BASIC_INFO_64,
+                                    (vm_region_info_t)&info, &count, &object);
+    if (kr == KERN_SUCCESS) {
+      [log appendFormat:@"  actual protection: cur=%c%c%c max=%c%c%c\n",
+                        (info.protection & VM_PROT_READ) ? 'r' : '-',
+                        (info.protection & VM_PROT_WRITE) ? 'w' : '-',
+                        (info.protection & VM_PROT_EXECUTE) ? 'x' : '-',
+                        (info.max_protection & VM_PROT_READ) ? 'r' : '-',
+                        (info.max_protection & VM_PROT_WRITE) ? 'w' : '-',
+                        (info.max_protection & VM_PROT_EXECUTE) ? 'x' : '-'];
+      [log appendFormat:@"  -> executable anonymous memory is %@\n",
+                        (info.protection & VM_PROT_EXECUTE)
+                            ? @"AVAILABLE"
+                            : @"NOT available (max protection forbids it)"];
     }
     munmap(page, 4096);
   }
 
-  // Now the real subject: launchd_sim itself.
+  // MAP_JIT is the sanctioned route, and needs the dynamic-codesigning
+  // entitlement. Worth knowing whether this signing identity carries it.
+  void *jitPage = mmap(NULL, 4096, PROT_READ | PROT_WRITE | PROT_EXEC,
+                       MAP_ANON | MAP_PRIVATE | MAP_JIT, -1, 0);
+  [log appendFormat:@"  mmap(MAP_JIT) -> %s\n",
+                    jitPage == MAP_FAILED ? strerror(errno) : "SUCCEEDED"];
+  if (jitPage != MAP_FAILED) munmap(jitPage, 4096);
+
+  // The real subject: launchd_sim itself. This runs regardless of the above.
   NSString *src = [runtimeRoot stringByAppendingPathComponent:@"sbin/launchd_sim"];
   NSFileManager *fm = [NSFileManager defaultManager];
   if (![fm fileExistsAtPath:src]) {
@@ -498,6 +535,11 @@ static void probeTestCodeLoading(NSMutableString *log, NSString *runtimeRoot) {
   BOOL wrote = [bin writeToFile:dst atomically:YES];
   [log appendFormat:@"  wrote converted copy: %d -> %@\n", wrote, dst];
   if (!wrote) return;
+
+  // Everything measured so far goes to the flushed trace file before the
+  // dlopen, because dyld can abort the process outright on a binary it
+  // dislikes -- and a crash there must not cost the results above.
+  probeBootLog([log substringFromIndex:startLen]);
 
   dlerror();
   void *h = dlopen(dst.fileSystemRepresentation, RTLD_NOW | RTLD_LOCAL);
