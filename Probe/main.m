@@ -20,6 +20,7 @@
 #import <sys/syslimits.h>
 #import <sys/mman.h>
 #import <mach/mach.h>
+#import <libkern/OSByteOrder.h>
 #import "RuntimeFetcher.h"
 
 @interface NSExtension : NSObject
@@ -513,21 +514,88 @@ static void probeTestCodeLoading(NSMutableString *log, NSString *runtimeRoot) {
     return;
   }
 
-  NSMutableData *bin = [NSMutableData dataWithContentsOfFile:src];
-  [log appendFormat:@"launchd_sim: %lu bytes\n", (unsigned long)bin.length];
-  if (bin.length < 32) return;
+  NSData *raw = [NSData dataWithContentsOfFile:src];
+  [log appendFormat:@"launchd_sim: %lu bytes\n", (unsigned long)raw.length];
+  if (raw.length < 32) return;
 
+  // launchd_sim is a FAT binary. The first attempt read a fat header as if it
+  // were a Mach-O, saw a nonsense filetype and patched nothing -- dyld was
+  // handed the original file, and still rejected it purely on platform:
+  //
+  //   incompatible platform (have 'iOS-simulator', need 'iOS')
+  //
+  // which is the encouraging part: not a signature complaint. So do the job
+  // properly -- select the arm64 slice, then fix both fields dyld checks.
+  const uint8_t *bytes = raw.bytes;
+  uint32_t magic = OSSwapBigToHostInt32(*(const uint32_t *)bytes);
+  NSData *slice = raw;
+
+  if (magic == 0xcafebabe || magic == 0xcafebabf) {
+    BOOL is64 = (magic == 0xcafebabf);
+    uint32_t narch = OSSwapBigToHostInt32(*(const uint32_t *)(bytes + 4));
+    [log appendFormat:@"  FAT binary, %u slice(s)%@\n", narch, is64 ? @" (64-bit)" : @""];
+    slice = nil;
+    for (uint32_t i = 0; i < narch && i < 16; i++) {
+      const uint8_t *a = bytes + 8 + i * (is64 ? 32 : 20);
+      uint32_t cputype = OSSwapBigToHostInt32(*(const uint32_t *)a);
+      uint64_t off, size;
+      if (is64) {
+        off = OSSwapBigToHostInt64(*(const uint64_t *)(a + 8));
+        size = OSSwapBigToHostInt64(*(const uint64_t *)(a + 16));
+      } else {
+        off = OSSwapBigToHostInt32(*(const uint32_t *)(a + 8));
+        size = OSSwapBigToHostInt32(*(const uint32_t *)(a + 12));
+      }
+      [log appendFormat:@"    cputype=0x%08x offset=%llu size=%llu%@\n",
+                        cputype, off, size,
+                        cputype == 0x0100000C ? @"  <- arm64" : @""];
+      if (cputype == 0x0100000C && off + size <= raw.length) {
+        slice = [raw subdataWithRange:NSMakeRange((NSUInteger)off, (NSUInteger)size)];
+      }
+    }
+    if (!slice) {
+      [log appendString:@"  no arm64 slice found\n"];
+      return;
+    }
+  }
+
+  NSMutableData *bin = [NSMutableData dataWithData:slice];
   uint32_t *hdr = (uint32_t *)bin.mutableBytes;
-  [log appendFormat:@"  magic=0x%08x filetype=%u (2=MH_EXECUTE 6=MH_DYLIB)\n",
+  [log appendFormat:@"  slice: magic=0x%08x filetype=%u (2=MH_EXECUTE 6=MH_DYLIB)\n",
                     hdr[0], hdr[3]];
+  if (hdr[0] != 0xfeedfacf) {
+    [log appendString:@"  not a 64-bit Mach-O; stopping\n"];
+    return;
+  }
 
-  // Flip MH_EXECUTE -> MH_DYLIB so dlopen will consider it at all, and record
-  // the platform, since a simulator binary is built for platform 7 (iOS
-  // Simulator) rather than 2 (iOS) and dyld checks that separately.
+  // dlopen only considers dylibs.
   if (hdr[3] == 2) {
     hdr[3] = 6;
     [log appendString:@"  patched filetype MH_EXECUTE -> MH_DYLIB\n"];
   }
+
+  // And the field dyld actually complained about: LC_BUILD_VERSION platform,
+  // 7 (iOS Simulator) -> 2 (iOS). Same edit tools/patch_platform.py makes for
+  // the .simdeviceio plugins, applied here on device because this binary only
+  // exists inside the downloaded runtime.
+  uint32_t ncmds = hdr[4];
+  uint32_t off = 32;
+  int flipped = 0;
+  for (uint32_t i = 0; i < ncmds && off + 8 <= bin.length; i++) {
+    uint32_t *cmd = (uint32_t *)((uint8_t *)bin.mutableBytes + off);
+    uint32_t cmdSize = cmd[1];
+    if (cmdSize == 0 || off + cmdSize > bin.length) break;
+    if ((cmd[0] & ~0x80000000u) == 0x32 /* LC_BUILD_VERSION */) {
+      [log appendFormat:@"  LC_BUILD_VERSION platform=%u\n", cmd[2]];
+      if (cmd[2] == 7) {
+        cmd[2] = 2;
+        flipped++;
+      }
+    }
+    off += cmdSize;
+  }
+  [log appendFormat:@"  patched %d platform field(s) iOS-simulator -> iOS\n",
+                    flipped];
 
   NSString *dst = [NSHomeDirectory()
       stringByAppendingPathComponent:@"Documents/launchd_sim_as_dylib.dylib"];
