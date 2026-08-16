@@ -478,6 +478,20 @@ jobs:
               | tee profile-out/mounted-simruntime-paths.txt
             RT=$(head -1 profile-out/mounted-simruntime-paths.txt)
 
+            # Convert launchd_sim NOW, while this mount is open. The assemble
+            # step runs after this step detaches the image, and a re-mount there
+            # proved flaky, so stage the converted dylib to a path that survives
+            # into later steps. SideStore signs it with the app team on install,
+            # which is the identity library validation demands (proven on
+            # device: an ad-hoc copy is refused, a team-signed one loads).
+            LS=$(find "$MNT" -maxdepth 10 -path '*/RuntimeRoot/sbin/launchd_sim' -type f 2>/dev/null | head -1)
+            echo "launchd_sim in mounted runtime: ${LS:-<none>}"
+            if [ -n "$LS" ]; then
+              mkdir -p staged-launchd
+              python3 tools/convert_launchd_sim.py "$LS" staged-launchd/launchd_sim.dylib \
+                && otool -hv staged-launchd/launchd_sim.dylib | tail -2
+            fi
+
             if [ -n "$RT" ]; then
               echo "=== runtime bundle layout (top levels only) ==="
               find "$RT" -maxdepth 3 2>/dev/null | sed "s|$RT|<RUNTIME>|" | head -30 \
@@ -759,46 +773,18 @@ jobs:
           mkdir -p Payload/Probe.app/Frameworks
           cp coresim-stub-out/* Payload/Probe.app/Frameworks/
 
-          # Convert launchd_sim and ship it in Frameworks/ so SideStore signs
-          # it with the app team certificate on install. The device proved this
-          # is the only thing missing: an ad-hoc-signed conversion is READ by
-          # dyld and then refused under library validation (EPERM), while one of
-          # our own team-signed dylibs loads from the very same directory. So do
-          # the Mach-O surgery here and let SideStore provide the identity.
-          #
-          # launchd_sim lives inside the installed iOS simulator runtime. Find
-          # it wherever this runner keeps the runtime; mount an image only if a
-          # loose copy isn't already present.
-          # find, not a glob loop: the runtime bundle is literally named
-          # "iOS 17.2.simruntime" -- the space in that path word-split an
-          # earlier `for cand in` version and nothing ever matched. Search the
-          # roots where a runtime can live, including any image already mounted
-          # by a previous step (the profile-dump step mounts one at /tmp/simrt).
-          LS=""
-          for root in \
-            /tmp/simrt \
-            /Library/Developer/CoreSimulator/Volumes \
-            /Library/Developer/CoreSimulator/Profiles/Runtimes \
-            "$(xcrun --sdk iphonesimulator --show-sdk-platform-path 2>/dev/null)/Developer/Library/CoreSimulator/Profiles/Runtimes"; do
-            [ -d "$root" ] || continue
-            LS=$(find "$root" -maxdepth 10 -path '*/RuntimeRoot/sbin/launchd_sim' -type f 2>/dev/null | head -1)
-            [ -n "$LS" ] && break
-          done
-          if [ -z "$LS" ]; then
-            IMG=$(ls -S /Library/Developer/CoreSimulator/Images/*.dmg 2>/dev/null | head -1)
-            if [ -n "$IMG" ]; then
-              mkdir -p /tmp/lsmount
-              sudo hdiutil attach "$IMG" -mountpoint /tmp/lsmount -nobrowse -readonly || true
-              LS=$(find /tmp/lsmount -maxdepth 10 -path '*/sbin/launchd_sim' -type f 2>/dev/null | head -1)
-            fi
-          fi
-          echo "launchd_sim source: ${LS:-<none found>}"
-          if [ -n "$LS" ] && [ -f "$LS" ]; then
-            python3 tools/convert_launchd_sim.py "$LS" \
+          # The converted launchd_sim was staged by the profile-dump step while
+          # its runtime image was still mounted. Ship it in Frameworks/ so
+          # SideStore signs it with the app team certificate on install -- the
+          # identity library validation requires (proven on device: an ad-hoc
+          # copy is refused with EPERM, a team-signed one loads).
+          if [ -f staged-launchd/launchd_sim.dylib ]; then
+            cp staged-launchd/launchd_sim.dylib \
               Payload/Probe.app/Frameworks/launchd_sim.dylib
+            echo "bundled converted launchd_sim:"
             otool -hv Payload/Probe.app/Frameworks/launchd_sim.dylib | tail -2
           else
-            echo "WARNING: launchd_sim not located; bundled copy will be absent"
+            echo "WARNING: staged launchd_sim absent; bundled copy will be missing"
           fi
 
           # Also ship CoreSimulator as a REAL framework bundle. Boot reached
