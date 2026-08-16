@@ -22,6 +22,7 @@
 #import <mach/mach.h>
 #import <libkern/OSByteOrder.h>
 #import <CommonCrypto/CommonDigest.h>
+#import <mach-o/dyld.h>
 #import "RuntimeFetcher.h"
 
 @interface NSExtension : NSObject
@@ -798,6 +799,62 @@ static void probeTestCodeLoading(NSMutableString *log, NSString *runtimeRoot) {
   [log appendFormat:@"  dlopen -> %s\n", h ? "SUCCESS" : "failed"];
   [log appendFormat:@"  dlerror: %s\n", err ?: "(none)"];
   if (h) dlclose(h);
+
+  // The ad-hoc signature was accepted as a signature (dyld read it: the
+  // reported codeBlobSize matches what was written) and then refused with
+  // errno=1, EPERM. The csops flags above say why: 0x2000 is CS_REQUIRE_LV,
+  // library validation, under which this process may load only libraries
+  // signed by the same team as the app -- or by Apple. An ad-hoc signature
+  // names no team, so CS_DEBUGGED does not enter into it.
+  //
+  // Two checks to be sure of that reading rather than inferring it from a
+  // flag. Both are cheap and answer different questions.
+
+  // 1. A control. Copy one of our OWN shipped dylibs, untouched and still
+  //    carrying the app's team signature, into the same directory and load it
+  //    from there. If that succeeds, location is irrelevant and the signing
+  //    identity is the whole difference. If it fails too, the problem is
+  //    loading from the data container at all, and the LV reading is wrong.
+  NSString *signedSrc = [[[NSBundle mainBundle] bundlePath]
+      stringByAppendingPathComponent:@"Frameworks/CoreServices"];
+  NSString *signedDst = [NSHomeDirectory()
+      stringByAppendingPathComponent:@"Documents/lv-control.dylib"];
+  [fm removeItemAtPath:signedDst error:NULL];
+  if ([fm copyItemAtPath:signedSrc toPath:signedDst error:NULL]) {
+    dlerror();
+    void *ch = dlopen(signedDst.fileSystemRepresentation, RTLD_NOW | RTLD_LOCAL);
+    const char *cerr = dlerror();
+    [log appendFormat:@"\n  control (our own team-signed dylib, same directory):\n"
+                       "    dlopen -> %s\n    dlerror: %s\n",
+                      ch ? "SUCCESS" : "failed", cerr ?: "(none)"];
+    if (ch) dlclose(ch);
+  } else {
+    [log appendString:@"\n  control: could not copy a signed dylib to test with\n"];
+  }
+
+  // 2. The other loading path. NSCreateObjectFileImageFromMemory takes an
+  //    MH_BUNDLE from a memory buffer rather than a file, which is how some
+  //    loaders sidestep the file-backed path entirely. Whether it still runs
+  //    the same validation on iOS 26 is worth knowing directly.
+  uint32_t *bhdr = (uint32_t *)bin.mutableBytes;
+  bhdr[3] = 8;   // MH_BUNDLE
+  NSObjectFileImage img = NULL;
+  NSObjectFileImageReturnCode rc2 =
+      NSCreateObjectFileImageFromMemory(bin.bytes, bin.length, &img);
+  [log appendFormat:@"\n  NSCreateObjectFileImageFromMemory (MH_BUNDLE) -> %d%s\n",
+                    (int)rc2,
+                    rc2 == NSObjectFileImageSuccess ? "  (success)" : ""];
+  if (rc2 == NSObjectFileImageSuccess) {
+    NSModule mod = NSLinkModule(img, "launchd_sim",
+                                NSLINKMODULE_OPTION_PRIVATE |
+                                NSLINKMODULE_OPTION_RETURN_ON_ERROR);
+    [log appendFormat:@"  NSLinkModule -> %s\n", mod ? "LINKED" : "failed"];
+    if (!mod) {
+      NSLinkEditErrors c; int n; const char *fname; const char *emsg;
+      NSLinkEditError(&c, &n, &fname, &emsg);
+      [log appendFormat:@"  NSLinkEditError: %s\n", emsg ?: "(none)"];
+    }
+  }
 }
 
 // libobjc's hook, not Foundation's. The assertion is thrown on
