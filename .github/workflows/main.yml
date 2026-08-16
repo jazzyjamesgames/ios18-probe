@@ -769,19 +769,27 @@ jobs:
           # launchd_sim lives inside the installed iOS simulator runtime. Find
           # it wherever this runner keeps the runtime; mount an image only if a
           # loose copy isn't already present.
+          # find, not a glob loop: the runtime bundle is literally named
+          # "iOS 17.2.simruntime" -- the space in that path word-split an
+          # earlier `for cand in` version and nothing ever matched. Search the
+          # roots where a runtime can live, including any image already mounted
+          # by a previous step (the profile-dump step mounts one at /tmp/simrt).
           LS=""
-          for cand in \
-            /Library/Developer/CoreSimulator/Volumes/*/Library/Developer/CoreSimulator/Profiles/Runtimes/*.simruntime/Contents/Resources/RuntimeRoot/sbin/launchd_sim \
-            /Library/Developer/CoreSimulator/Profiles/Runtimes/*.simruntime/Contents/Resources/RuntimeRoot/sbin/launchd_sim \
-            "$(xcrun --sdk iphonesimulator --show-sdk-platform-path 2>/dev/null)"/Developer/Library/CoreSimulator/Profiles/Runtimes/*.simruntime/Contents/Resources/RuntimeRoot/sbin/launchd_sim; do
-            if [ -f "$cand" ]; then LS="$cand"; break; fi
+          for root in \
+            /tmp/simrt \
+            /Library/Developer/CoreSimulator/Volumes \
+            /Library/Developer/CoreSimulator/Profiles/Runtimes \
+            "$(xcrun --sdk iphonesimulator --show-sdk-platform-path 2>/dev/null)/Developer/Library/CoreSimulator/Profiles/Runtimes"; do
+            [ -d "$root" ] || continue
+            LS=$(find "$root" -maxdepth 10 -path '*/RuntimeRoot/sbin/launchd_sim' -type f 2>/dev/null | head -1)
+            [ -n "$LS" ] && break
           done
           if [ -z "$LS" ]; then
             IMG=$(ls -S /Library/Developer/CoreSimulator/Images/*.dmg 2>/dev/null | head -1)
             if [ -n "$IMG" ]; then
               mkdir -p /tmp/lsmount
               sudo hdiutil attach "$IMG" -mountpoint /tmp/lsmount -nobrowse -readonly || true
-              LS=$(find /tmp/lsmount -maxdepth 8 -path '*/sbin/launchd_sim' -type f 2>/dev/null | head -1)
+              LS=$(find /tmp/lsmount -maxdepth 10 -path '*/sbin/launchd_sim' -type f 2>/dev/null | head -1)
             fi
           fi
           echo "launchd_sim source: ${LS:-<none found>}"
